@@ -1,7 +1,9 @@
 import logging
 import os
+import json
+import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
-from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -10,67 +12,204 @@ from contextlib import asynccontextmanager
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TOKEN")
-# This should match your Render Service URL (e.g., https://myapp.onrender.com)
 WEB_APP_URL = os.getenv("WEB_APP_URL", "")
+DATA_FILE = "storage.json"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# In-memory storage (Resets on restart)
-events_db = {}
+# --- PERSISTENCE ---
+def load_data():
+    if os.path.exists(DATA_FILE):
+        with open(DATA_FILE, "r") as f:
+            return json.load(f)
+    return {}
+
+def save_data(data):
+    with open(DATA_FILE, "w") as f:
+        json.dump(data, f)
+
+events_db = load_data()
+
+# --- HELPERS ---
+def parse_event_name(text: str, command: str) -> str:
+    """Robustly extracts event name from messages like '/schedule@bot Event Name'"""
+    # Remove the command part regardless of suffixes
+    parts = text.split(" ", 1)
+    if len(parts) > 1:
+        return parts[1].strip()
+    return ""
 
 # --- BOT LOGIC ---
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Hi! Use /schedule <Name> to start a new poll.")
 
-async def create_schedule(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not context.args:
-        await update.message.reply_text("Please provide a name. Usage: /schedule <Event Name>")
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "👋 **When2Meet Bot**\n\n"
+        "To start, type:\n`/schedule <Event Name>`\n\n"
+        "I support both **Time Slots** (hourly) and **Whole Dates**.",
+        parse_mode="Markdown"
+    )
+
+async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 1: User types /schedule, Bot asks for Mode (Time vs Date)"""
+    text = update.message.text
+    event_name = parse_event_name(text, "/schedule")
+    
+    if not event_name:
+        await update.message.reply_text(
+            "⚠️ **Missing Event Name**\n\n"
+            "Usage: `/schedule Team Dinner`\n"
+            "Try typing it again!", 
+            parse_mode="Markdown"
+        )
         return
 
-    event_name = " ".join(context.args)
-    # Create a unique ID for this event
-    event_id = f"{update.effective_chat.id}_{update.message.message_id}"
-    events_db[event_id] = {}
-
-    # This URL opens the Mini App
-    full_url = f"{WEB_APP_URL}?eventId={event_id}&eventName={event_name}"
+    # Create a temp ID for this interaction
+    # Structure: "setup_ChatID_MsgID"
+    setup_id = f"{update.effective_chat.id}_{update.message.message_id}"
     
+    # Store the name temporarily in context (or encode in callback data if short)
+    # We'll encode it in the callback to be stateless
+    # CALLBACK FORMAT: "mode_TYPE_EVENTNAME" (Careful with length, telegram limit is 64 bytes)
+    # Better approach: Save draft to DB
+    events_db[f"draft_{setup_id}"] = event_name
+    save_data(events_db)
+
+    keyboard = [
+        [
+            InlineKeyboardButton("🕒 Time Slots", callback_data=f"setmode_time_{setup_id}"),
+            InlineKeyboardButton("📅 Whole Days", callback_data=f"setmode_date_{setup_id}")
+        ]
+    ]
+    
+    await update.message.reply_text(
+        f"⚙️ Setup for **{event_name}**:\n\n"
+        "Do you want to schedule by specific **Time Slots** (e.g., 9:00 AM) or **Whole Days**?",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+        parse_mode="Markdown"
+    )
+
+async def finalize_event_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Step 2: User clicks mode, Bot creates the final event"""
+    query = update.callback_query
+    await query.answer()
+    
+    data = query.data.split("_") # ["setmode", "time", "setup_ID"]
+    mode = data[1]
+    setup_id = "_".join(data[2:]) # Reconstruct ID
+    
+    draft_key = f"draft_{setup_id}"
+    event_name = events_db.get(draft_key, "New Event")
+    
+    # Clean up draft
+    if draft_key in events_db:
+        del events_db[draft_key]
+    
+    # Create Real Event ID
+    event_id = f"{query.message.chat.id}_{query.message.message_id}"
+    
+    events_db[event_id] = {
+        "name": event_name, 
+        "mode": mode, 
+        "votes": {}
+    }
+    save_data(events_db)
+
+    # Generate Web App URL with Mode
+    full_url = f"{WEB_APP_URL}?eventId={event_id}&eventName={event_name}&mode={mode}"
     web_app = WebAppInfo(url=full_url)
     
-    keyboard = [[InlineKeyboardButton("📅 Add Availability", web_app=web_app)]]
-    await update.message.reply_text(
-        f"🗓 **{event_name}**\nClick below to add your times!", 
+    view_btn = InlineKeyboardButton("📊 View Results", callback_data=f"view_{event_id}")
+
+    keyboard = [
+        [InlineKeyboardButton("👉 Add Availability", web_app=web_app)],
+        [view_btn]
+    ]
+    
+    mode_text = "Hourly Slots" if mode == "time" else "Whole Dates"
+    
+    await query.message.edit_text(
+        f"🗓 **{event_name}**\n"
+        f"Mode: {mode_text}\n\n"
+        "Tap below to vote!",
         reply_markup=InlineKeyboardMarkup(keyboard), 
         parse_mode="Markdown"
     )
 
-async def web_app_data_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handles service messages (rarely used in this specific setup but good to have)"""
-    if update.effective_message.web_app_data:
-        await update.message.reply_text("Data received via Service Message!")
+async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+
+    # Parse ID: view_ChatID_MsgID
+    try:
+        event_id = query.data.replace("view_", "")
+        event = events_db.get(event_id)
+    except:
+        event = None
+
+    if not event:
+        await query.message.reply_text("❌ Event not found (it might be old).")
+        return
+
+    votes = event.get("votes", {})
+    if not votes:
+        await query.message.reply_text("❌ No votes recorded yet!")
+        return
+
+    # Tally Votes
+    slot_counts = {}
+    total_users = len(votes)
+    
+    for user, slots in votes.items():
+        for slot in slots:
+            slot_counts[slot] = slot_counts.get(slot, 0) + 1
+
+    sorted_slots = sorted(slot_counts.items(), key=lambda x: x[1], reverse=True)
+    
+    # Format Message
+    msg = f"📊 **{event['name']}** ({total_users} voted)\n\n"
+    
+    if event.get("mode") == "date":
+        # Date Mode Display
+        msg += "🏆 **Best Dates:**\n"
+        for slot, count in sorted_slots[:5]:
+            # slot is "YYYY-MM-DD"
+            msg += f"• {slot}: {count}/{total_users} votes\n"
+    else:
+        # Time Mode Display
+        days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
+        msg += "🏆 **Best Times:**\n"
+        for slot, count in sorted_slots[:5]:
+            # slot is "dayIndex-hour" (e.g., "0-9")
+            try:
+                d_idx, hour = map(int, slot.split("-"))
+                day_name = days[d_idx] if d_idx < 7 else "Day"
+                msg += f"• {day_name} {hour}:00 : {count}/{total_users}\n"
+            except:
+                continue
+
+    await query.message.reply_text(msg, parse_mode="Markdown")
 
 # --- FASTAPI SERVER ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Startup: Run the bot
     application = Application.builder().token(TOKEN).build()
+    
     application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("schedule", create_schedule))
-    application.add_handler(MessageHandler(filters.StatusUpdate.WEB_APP_DATA, web_app_data_handler))
+    application.add_handler(CommandHandler("schedule", ask_event_mode)) # Changed handler!
+    application.add_handler(CallbackQueryHandler(finalize_event_creation, pattern="^setmode_"))
+    application.add_handler(CallbackQueryHandler(view_results, pattern="^view_"))
     
     await application.initialize()
     await application.start()
     await application.updater.start_polling()
     yield
-    # Shutdown: Stop the bot
     await application.updater.stop()
     await application.stop()
     await application.shutdown()
 
 app = FastAPI(lifespan=lifespan)
 
-# Allow the frontend to talk to the backend
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -78,28 +217,24 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- THE NEW PART: SERVE THE HTML FILE ---
 @app.get("/")
 async def serve_frontend():
-    """Reads index.html from the disk and sends it to the browser"""
-    # Ensure index.html exists in the same folder
     try:
         with open("index.html", "r") as f:
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
-        return HTMLResponse(content="<h1>Error: index.html not found on server</h1>", status_code=404)
+        return HTMLResponse(content="<h1>Error: index.html not found</h1>", status_code=404)
 
 @app.post("/submit_availability")
 async def submit_availability(request: Request):
-    """API Endpoint that the HTML file talks to"""
     data = await request.json()
     event_id = data.get("eventId")
-    user_id = data.get("userId")
+    user_id = str(data.get("userId"))
     slots = data.get("slots")
     
     if event_id not in events_db:
-        events_db[event_id] = {}
+        return {"status": "error", "message": "Event not found"}
     
-    events_db[event_id][user_id] = slots
-    logger.info(f"Saved data for user {user_id} in event {event_id}")
-    return {"status": "success", "count": len(events_db[event_id])}
+    events_db[event_id]["votes"][user_id] = slots
+    save_data(events_db)
+    return {"status": "success"}
