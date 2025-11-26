@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>Availability Selector</title>
+    <!-- Telegram Web App Script -->
+    <script src="https://telegram.org/js/telegram-web-app.js"></script>
+    <style>
+        :root {
+            --bg-color: var(--tg-theme-bg-color, #fff);
+            --text-color: var(--tg-theme-text-color, #000);
+            --hint-color: var(--tg-theme-hint-color, #999);
+            --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
+            --button-color: var(--tg-theme-button-color, #2481cc);
+            --button-text-color: var(--tg-theme-button-text-color, #fff);
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            user-select: none; /* Prevent text selection while dragging */
+            overscroll-behavior: none; /* Prevent pull-to-refresh on mobile */
+        }
+
+        .container {
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+        }
+
+        header {
+            padding: 15px;
+            text-align: center;
+            border-bottom: 1px solid var(--secondary-bg);
+            flex-shrink: 0;
+        }
+
+        h2 {
+            margin: 0;
+            font-size: 18px;
+        }
+
+        .hint {
+            font-size: 13px;
+            color: var(--hint-color);
+            margin-top: 5px;
+        }
+
+        /* The scrollable grid area */
+        .grid-wrapper {
+            flex-grow: 1;
+            overflow: auto;
+            position: relative;
+            padding-bottom: 20px;
+        }
+
+        .grid-container {
+            display: grid;
+            /* 50px for time labels, then equal columns for days */
+            grid-template-columns: 50px repeat(auto-fit, minmax(60px, 1fr)); 
+            gap: 1px;
+            background-color: var(--secondary-bg); /* Gap color */
+            border-top: 1px solid var(--secondary-bg);
+        }
+
+        /* Sticky Headers */
+        .header-cell {
+            background-color: var(--bg-color);
+            font-weight: 600;
+            font-size: 13px;
+            text-align: center;
+            padding: 10px 2px;
+            position: sticky;
+            top: 0;
+            z-index: 20;
+            box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+        }
+
+        /* Time Column */
+        .time-col {
+            background-color: var(--bg-color);
+            font-size: 11px;
+            color: var(--hint-color);
+            text-align: right;
+            padding-right: 8px;
+            transform: translateY(-50%); /* Center label on the line */
+            position: sticky;
+            left: 0;
+            z-index: 10;
+        }
+
+        /* The actual clickable slots */
+        .slot {
+            height: 35px;
+            background-color: var(--bg-color);
+            cursor: pointer;
+            touch-action: none; /* Critical for custom touch handling */
+            transition: background-color 0.1s;
+        }
+
+        .slot.selected {
+            background-color: #4caf50; /* Green for available */
+        }
+        
+        /* Optional: "If needed" yellow state could be added here later */
+
+        .loading-overlay {
+            position: fixed;
+            top: 0; left: 0; right: 0; bottom: 0;
+            background: rgba(0,0,0,0.5);
+            color: white;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            z-index: 1000;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <header>
+        <h2 id="event-title">Loading Event...</h2>
+        <p class="hint">Tap & drag to paint green (Available)</p>
+    </header>
+    
+    <div class="grid-wrapper">
+        <div id="grid" class="grid-container">
+            <!-- JS will populate this -->
+        </div>
+    </div>
+</div>
+
+<div id="loader" class="loading-overlay">Saving...</div>
+
+<script>
+    const tg = window.Telegram.WebApp;
+    tg.expand(); 
+
+    // --- CONFIGURATION ---
+    // You can make these dynamic based on query params if you want
+    // Ideally, pass start_date and days_count in URL params
+    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']; 
+    const startHour = 8;
+    const endHour = 22; // 10 PM
+    
+    // API URL - Replace this with your actual Render/Railway URL when deployed
+    // For local testing, use http://localhost:8000
+    const BACKEND_API_URL = "https://your-bot-app.onrender.com"; 
+
+    // --- STATE ---
+    let isDragging = false;
+    let paintMode = true; // true = adding, false = removing
+    const selectedSlots = new Set(); // Stores "dayIndex-hour"
+
+    // --- INITIALIZATION ---
+    const urlParams = new URLSearchParams(window.location.search);
+    const eventName = urlParams.get('eventName') || "Team Schedule";
+    const eventId = urlParams.get('eventId');
+    
+    document.getElementById('event-title').innerText = eventName;
+
+    const grid = document.getElementById('grid');
+    
+    // Set grid columns based on days
+    grid.style.gridTemplateColumns = `50px repeat(${dayLabels.length}, 1fr)`;
+
+    // 1. Render Header Row (Empty corner + Days)
+    const corner = document.createElement('div');
+    corner.className = 'header-cell';
+    grid.appendChild(corner);
+
+    dayLabels.forEach(day => {
+        const dh = document.createElement('div');
+        dh.className = 'header-cell';
+        dh.innerText = day;
+        grid.appendChild(dh);
+    });
+
+    // 2. Render Grid Rows
+    for (let h = startHour; h < endHour; h++) {
+        // Time Label
+        const timeCell = document.createElement('div');
+        timeCell.className = 'time-col';
+        timeCell.innerText = `${h}:00`;
+        grid.appendChild(timeCell);
+
+        // Slots
+        for (let d = 0; d < dayLabels.length; d++) {
+            const slot = document.createElement('div');
+            slot.className = 'slot';
+            slot.dataset.id = `${d}-${h}`; // e.g., "0-9" for Mon 9am
+            
+            // Events
+            slot.addEventListener('mousedown', onMouseDown);
+            slot.addEventListener('mouseenter', onMouseEnter);
+            slot.addEventListener('touchstart', onTouchStart, {passive: false});
+            slot.addEventListener('touchmove', onTouchMove, {passive: false});
+            
+            grid.appendChild(slot);
+        }
+    }
+
+    // Global Event Listeners
+    document.addEventListener('mouseup', () => isDragging = false);
+    document.addEventListener('touchend', () => isDragging = false);
+
+    // --- INTERACTION LOGIC ---
+
+    function toggleSlot(slot) {
+        if (!slot) return;
+        const id = slot.dataset.id;
+        if (paintMode) {
+            slot.classList.add('selected');
+            selectedSlots.add(id);
+        } else {
+            slot.classList.remove('selected');
+            selectedSlots.delete(id);
+        }
+    }
+
+    // Mouse Events
+    function onMouseDown(e) {
+        isDragging = true;
+        // If clicking an already selected slot, switch to erase mode
+        paintMode = !e.target.classList.contains('selected');
+        toggleSlot(e.target);
+    }
+
+    function onMouseEnter(e) {
+        if (isDragging) toggleSlot(e.target);
+    }
+
+    // Touch Events (More complex because touchmove doesn't fire on the target element essentially)
+    function onTouchStart(e) {
+        if(e.cancelable) e.preventDefault(); // Prevent scrolling while drawing
+        isDragging = true;
+        const slot = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+        if (slot && slot.classList.contains('slot')) {
+            paintMode = !slot.classList.contains('selected');
+            toggleSlot(slot);
+        }
+    }
+
+    function onTouchMove(e) {
+        if(e.cancelable) e.preventDefault();
+        if (!isDragging) return;
+        
+        const slot = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+        if (slot && slot.classList.contains('slot')) {
+            toggleSlot(slot);
+        }
+    }
+
+    // --- SUBMISSION LOGIC ---
+
+    tg.MainButton.setText("SUBMIT TIMES");
+    tg.MainButton.show();
+
+    tg.MainButton.onClick(async () => {
+        // Prepare Data
+        const payload = {
+            eventId: eventId,
+            userId: tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : 'demo_user',
+            username: tg.initDataUnsafe.user ? tg.initDataUnsafe.user.first_name : 'Demo',
+            slots: Array.from(selectedSlots)
+        };
+
+        // UI Feedback
+        tg.MainButton.showProgress();
+        document.getElementById('loader').style.display = 'flex';
+
+        try {
+            // Send to Backend
+            // NOTE: Replace this fetch with your actual backend endpoint
+            /*
+            await fetch(`${BACKEND_API_URL}/submit_availability`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify(payload)
+            });
+            */
+            
+            // For now, we simulate success so you can test the UI without a backend
+            console.log("Submitting:", payload);
+            await new Promise(r => setTimeout(r, 800)); // Fake delay
+
+            // Close Web App
+            tg.MainButton.hideProgress();
+            tg.close();
+        } catch (error) {
+            tg.MainButton.hideProgress();
+            document.getElementById('loader').style.display = 'none';
+            tg.showAlert("Failed to save availability. Please try again.");
+            console.error(error);
+        }
+    });
+
+</script>
+</body>
+</html>
