@@ -3,46 +3,66 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Availability Selector</title>
+    <title>Availability</title>
     <script src="https://telegram.org/js/telegram-web-app.js"></script>
     <style>
         :root {
             --bg-color: var(--tg-theme-bg-color, #fff);
             --text-color: var(--tg-theme-text-color, #000);
-            --hint-color: var(--tg-theme-hint-color, #999);
             --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
             --button-color: var(--tg-theme-button-color, #2481cc);
+            --green: #4caf50;
         }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-            margin: 0; padding: 0; background-color: var(--bg-color); color: var(--text-color);
-            user-select: none; overscroll-behavior: none;
+            font-family: -apple-system, system-ui, sans-serif;
+            margin: 0; padding: 0; 
+            background-color: var(--bg-color); color: var(--text-color);
+            user-select: none;
         }
         .container { display: flex; flex-direction: column; height: 100vh; }
-        header { padding: 15px; text-align: center; border-bottom: 1px solid var(--secondary-bg); flex-shrink: 0; }
-        h2 { margin: 0; font-size: 18px; }
-        .hint { font-size: 13px; color: var(--hint-color); margin-top: 5px; }
-        .grid-wrapper { flex-grow: 1; overflow: auto; position: relative; padding-bottom: 20px; }
+        header { padding: 15px; text-align: center; border-bottom: 1px solid var(--secondary-bg); }
+        
+        /* --- TIME GRID STYLES --- */
+        .time-grid-wrapper { flex-grow: 1; overflow: auto; display: none; } /* Hidden by default */
         .grid-container {
             display: grid;
-            grid-template-columns: 50px repeat(auto-fit, minmax(60px, 1fr)); 
+            grid-template-columns: 50px repeat(5, 1fr); 
             gap: 1px; background-color: var(--secondary-bg); border-top: 1px solid var(--secondary-bg);
         }
         .header-cell {
-            background-color: var(--bg-color); font-weight: 600; font-size: 13px; text-align: center;
-            padding: 10px 2px; position: sticky; top: 0; z-index: 20; box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+            background-color: var(--bg-color); font-weight: bold; font-size: 13px; text-align: center;
+            padding: 10px 2px; position: sticky; top: 0; z-index: 20;
         }
         .time-col {
-            background-color: var(--bg-color); font-size: 11px; color: var(--hint-color); text-align: right;
-            padding-right: 8px; transform: translateY(-50%); position: sticky; left: 0; z-index: 10;
+            background-color: var(--bg-color); font-size: 11px; text-align: right;
+            padding-right: 8px; position: sticky; left: 0; z-index: 10;
         }
-        .slot {
-            height: 35px; background-color: var(--bg-color); cursor: pointer; touch-action: none; transition: background-color 0.1s;
+        .slot { height: 35px; background-color: var(--bg-color); }
+
+        /* --- CALENDAR STYLES (New) --- */
+        .calendar-wrapper { flex-grow: 1; overflow: auto; padding: 20px; display: none; }
+        .calendar-grid {
+            display: grid;
+            grid-template-columns: repeat(7, 1fr);
+            gap: 8px;
         }
-        .slot.selected { background-color: #4caf50; }
-        .loading-overlay {
-            position: fixed; top: 0; left: 0; right: 0; bottom: 0; background: rgba(0,0,0,0.5);
-            color: white; display: none; align-items: center; justify-content: center; z-index: 1000;
+        .cal-day {
+            aspect-ratio: 1;
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            background-color: var(--secondary-bg);
+            border-radius: 8px;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .cal-day-name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
+        
+        /* --- SHARED INTERACTIVE --- */
+        .selected { background-color: var(--green) !important; color: white; }
+        
+        #loader {
+            position: fixed; top: 0; left: 0; right: 0; bottom: 0; 
+            background: rgba(0,0,0,0.5); display: none; 
+            align-items: center; justify-content: center; color: white;
         }
     </style>
 </head>
@@ -50,131 +70,193 @@
 
 <div class="container">
     <header>
-        <h2 id="event-title">Loading Event...</h2>
-        <p class="hint">Tap & drag to paint green (Available)</p>
+        <h2 id="event-title">Loading...</h2>
+        <p class="hint" id="hint-text">Select your availability</p>
     </header>
-    <div class="grid-wrapper">
+
+    <!-- MODE 1: TIME GRID -->
+    <div id="time-view" class="time-grid-wrapper">
         <div id="grid" class="grid-container"></div>
     </div>
+
+    <!-- MODE 2: CALENDAR GRID -->
+    <div id="date-view" class="calendar-wrapper">
+        <div id="calendar" class="calendar-grid"></div>
+    </div>
 </div>
-<div id="loader" class="loading-overlay">Saving...</div>
+
+<div id="loader">Saving...</div>
 
 <script>
     const tg = window.Telegram.WebApp;
     tg.expand(); 
 
-    // --- IMPORTANT CHANGE HERE ---
-    // Leave this empty! It means "talk to the server that served this page"
-    const BACKEND_API_URL = ""; 
+    const BACKEND_API_URL = ""; // Relative path
 
-    const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri']; 
-    const startHour = 8;
-    const endHour = 22; 
-    let isDragging = false;
-    let paintMode = true; 
-    const selectedSlots = new Set(); 
-
+    // Get Params
     const urlParams = new URLSearchParams(window.location.search);
-    const eventName = urlParams.get('eventName') || "Team Schedule";
+    const eventName = urlParams.get('eventName') || "Event";
     const eventId = urlParams.get('eventId');
+    const mode = urlParams.get('mode') || 'time'; // 'time' or 'date'
+
     document.getElementById('event-title').innerText = eventName;
+    
+    // State
+    const selectedSlots = new Set();
+    let isDragging = false;
+    let paintMode = true;
 
-    const grid = document.getElementById('grid');
-    grid.style.gridTemplateColumns = `50px repeat(${dayLabels.length}, 1fr)`;
+    // --- INITIALIZATION ---
+    if (mode === 'date') {
+        initCalendar();
+    } else {
+        initTimeGrid();
+    }
 
-    const corner = document.createElement('div');
-    corner.className = 'header-cell';
-    grid.appendChild(corner);
+    // --- RENDERERS ---
 
-    dayLabels.forEach(day => {
-        const dh = document.createElement('div');
-        dh.className = 'header-cell';
-        dh.innerText = day;
-        grid.appendChild(dh);
-    });
+    function initCalendar() {
+        document.getElementById('date-view').style.display = 'block';
+        document.getElementById('hint-text').innerText = "Tap dates you are available";
+        
+        const cal = document.getElementById('calendar');
+        const today = new Date();
+        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-    for (let h = startHour; h < endHour; h++) {
-        const timeCell = document.createElement('div');
-        timeCell.className = 'time-col';
-        timeCell.innerText = `${h}:00`;
-        grid.appendChild(timeCell);
-
-        for (let d = 0; d < dayLabels.length; d++) {
-            const slot = document.createElement('div');
-            slot.className = 'slot';
-            slot.dataset.id = `${d}-${h}`; 
+        // Generate next 35 days
+        for (let i = 0; i < 35; i++) {
+            const date = new Date();
+            date.setDate(today.getDate() + i);
             
-            slot.addEventListener('mousedown', onMouseDown);
-            slot.addEventListener('mouseenter', onMouseEnter);
-            slot.addEventListener('touchstart', onTouchStart, {passive: false});
-            slot.addEventListener('touchmove', onTouchMove, {passive: false});
-            grid.appendChild(slot);
+            const dateStr = date.toISOString().split('T')[0]; // "2023-11-27"
+            const dayName = days[date.getDay()];
+            const dayNum = date.getDate();
+
+            const cell = document.createElement('div');
+            cell.className = 'cal-day';
+            cell.dataset.id = dateStr;
+            cell.innerHTML = `<span class="cal-day-name">${dayName}</span><span>${dayNum}</span>`;
+            
+            cell.onclick = () => {
+                if (selectedSlots.has(dateStr)) {
+                    selectedSlots.delete(dateStr);
+                    cell.classList.remove('selected');
+                } else {
+                    selectedSlots.add(dateStr);
+                    cell.classList.add('selected');
+                }
+            };
+            cal.appendChild(cell);
         }
     }
 
+    function initTimeGrid() {
+        document.getElementById('time-view').style.display = 'block';
+        document.getElementById('hint-text').innerText = "Drag to paint times";
+
+        const grid = document.getElementById('grid');
+        const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
+        
+        // Header
+        const corner = document.createElement('div');
+        corner.className = 'header-cell';
+        grid.appendChild(corner);
+        dayLabels.forEach(d => {
+            const h = document.createElement('div');
+            h.className = 'header-cell';
+            h.innerText = d;
+            grid.appendChild(h);
+        });
+
+        // Rows
+        for (let h = 8; h < 22; h++) {
+            const timeCol = document.createElement('div');
+            timeCol.className = 'time-col';
+            timeCol.innerText = `${h}:00`;
+            grid.appendChild(timeCol);
+
+            for (let d = 0; d < dayLabels.length; d++) {
+                const slot = document.createElement('div');
+                slot.className = 'slot';
+                slot.dataset.id = `${d}-${h}`;
+                
+                // Drag Logic
+                slot.addEventListener('mousedown', startDrag);
+                slot.addEventListener('mouseenter', doDrag);
+                slot.addEventListener('touchstart', startTouch, {passive: false});
+                slot.addEventListener('touchmove', moveTouch, {passive: false});
+                
+                grid.appendChild(slot);
+            }
+        }
+    }
+
+    // --- DRAG LOGIC (Time Mode Only) ---
     document.addEventListener('mouseup', () => isDragging = false);
     document.addEventListener('touchend', () => isDragging = false);
 
-    function toggleSlot(slot) {
-        if (!slot) return;
-        const id = slot.dataset.id;
-        if (paintMode) {
-            slot.classList.add('selected');
-            selectedSlots.add(id);
-        } else {
-            slot.classList.remove('selected');
-            selectedSlots.delete(id);
-        }
-    }
-
-    function onMouseDown(e) {
+    function startDrag(e) {
         isDragging = true;
         paintMode = !e.target.classList.contains('selected');
         toggleSlot(e.target);
     }
-    function onMouseEnter(e) { if (isDragging) toggleSlot(e.target); }
-    function onTouchStart(e) {
+    function doDrag(e) { if (isDragging) toggleSlot(e.target); }
+    
+    function startTouch(e) {
         if(e.cancelable) e.preventDefault();
         isDragging = true;
-        const slot = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (slot && slot.classList.contains('slot')) {
-            paintMode = !slot.classList.contains('selected');
-            toggleSlot(slot);
+        const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+        if (el?.classList.contains('slot')) {
+            paintMode = !el.classList.contains('selected');
+            toggleSlot(el);
         }
     }
-    function onTouchMove(e) {
+    function moveTouch(e) {
         if(e.cancelable) e.preventDefault();
         if (!isDragging) return;
-        const slot = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (slot && slot.classList.contains('slot')) toggleSlot(slot);
+        const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+        if (el?.classList.contains('slot')) toggleSlot(el);
     }
 
-    tg.MainButton.setText("SUBMIT TIMES");
+    function toggleSlot(el) {
+        const id = el.dataset.id;
+        if (paintMode) {
+            el.classList.add('selected');
+            selectedSlots.add(id);
+        } else {
+            el.classList.remove('selected');
+            selectedSlots.delete(id);
+        }
+    }
+
+    // --- SUBMIT ---
+    tg.MainButton.setText("SUBMIT");
     tg.MainButton.show();
 
     tg.MainButton.onClick(async () => {
+        if (selectedSlots.size === 0) {
+            tg.showAlert("Please select at least one time!");
+            return;
+        }
+
         const payload = {
             eventId: eventId,
-            userId: tg.initDataUnsafe.user ? tg.initDataUnsafe.user.id : 'demo_user',
+            userId: tg.initDataUnsafe.user?.id || 'anon',
             slots: Array.from(selectedSlots)
         };
-        tg.MainButton.showProgress();
-        document.getElementById('loader').style.display = 'flex';
 
+        document.getElementById('loader').style.display = 'flex';
+        
         try {
-            // Using relative path to post data
             await fetch(`${BACKEND_API_URL}/submit_availability`, {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify(payload)
             });
-            
-            tg.MainButton.hideProgress();
             tg.close();
-        } catch (error) {
-            tg.MainButton.hideProgress();
+        } catch (e) {
             document.getElementById('loader').style.display = 'none';
-            tg.showAlert("Failed to save. Check internet connection.");
+            tg.showAlert("Error saving. Check connection.");
         }
     });
 </script>
