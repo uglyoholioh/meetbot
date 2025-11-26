@@ -8,7 +8,7 @@ import uvicorn
 from contextlib import asynccontextmanager
 
 # --- CONFIGURATION ---
-TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")  # Set your bot token in environment variable
+TOKEN = os.getenv("TOKEN")  # Set your bot token in environment variable
 # The URL where your index.html is hosted (e.g., Vercel/GitHub Pages)
 WEB_APP_URL = "https://meetbot-omega.vercel.app" 
 
