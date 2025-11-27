@@ -2,6 +2,8 @@ import logging
 import os
 import json
 import datetime
+import re
+import urllib.parse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from fastapi import FastAPI, Request
@@ -32,28 +34,58 @@ def save_data(data):
 events_db = load_data()
 
 # --- HELPERS ---
-def parse_event_name(text: str, command: str) -> str:
-    """Robustly extracts event name from messages like '/schedule@bot Event Name'"""
-    # Remove the command part regardless of suffixes
+def parse_command_input(text: str):
+    """
+    Extracts event name and optional date range (YYYY-MM-DD) from input.
+    Returns (name, start_date, end_date)
+    """
+    if not text:
+        return "", None, None
     parts = text.split(" ", 1)
-    if len(parts) > 1:
-        return parts[1].strip()
-    return ""
+    if len(parts) < 2:
+        return "", None, None
+
+    raw_args = parts[1].strip()
+
+    # Regex for YYYY-MM-DD
+    date_pattern = r"(\d{4}-\d{2}-\d{2})"
+    dates = re.findall(date_pattern, raw_args)
+
+    start_date = None
+    end_date = None
+
+    if len(dates) >= 2:
+        start_date = dates[0]
+        end_date = dates[1]
+        # Remove dates from name (simple replace might be risky if name contains date, but acceptable for now)
+        name = raw_args.replace(start_date, "").replace(end_date, "").strip()
+    elif len(dates) == 1:
+        start_date = dates[0]
+        name = raw_args.replace(start_date, "").strip()
+    else:
+        name = raw_args
+
+    # Clean up extra spaces/commas if user typed "Name, Date"
+    name = name.strip(" ,")
+
+    return name, start_date, end_date
 
 # --- BOT LOGIC ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 **When2Meet Bot**\n\n"
-        "To start, type:\n`/schedule <Event Name>`\n\n"
-        "I support both **Time Slots** (hourly) and **Whole Dates**.",
+        "To start, type:\n`/schedule <Event Name> [Start Date] [End Date]`\n\n"
+        "Examples:\n"
+        "`/schedule Team Dinner` (Defaults to next 35 days)\n"
+        "`/schedule Trip 2023-12-01 2023-12-05` (Specific range)",
         parse_mode="Markdown"
     )
 
 async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Step 1: User types /schedule, Bot asks for Mode (Time vs Date)"""
     text = update.message.text
-    event_name = parse_event_name(text, "/schedule")
+    event_name, start_date, end_date = parse_command_input(text)
     
     if not event_name:
         await update.message.reply_text(
@@ -65,14 +97,14 @@ async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
 
     # Create a temp ID for this interaction
-    # Structure: "setup_ChatID_MsgID"
     setup_id = f"{update.effective_chat.id}_{update.message.message_id}"
     
-    # Store the name temporarily in context (or encode in callback data if short)
-    # We'll encode it in the callback to be stateless
-    # CALLBACK FORMAT: "mode_TYPE_EVENTNAME" (Careful with length, telegram limit is 64 bytes)
-    # Better approach: Save draft to DB
-    events_db[f"draft_{setup_id}"] = event_name
+    # Store the draft data
+    events_db[f"draft_{setup_id}"] = {
+        "name": event_name,
+        "start_date": start_date,
+        "end_date": end_date
+    }
     save_data(events_db)
 
     keyboard = [
@@ -82,8 +114,15 @@ async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
     ]
     
+    date_info = ""
+    if start_date:
+        date_info = f"\n(Range: {start_date}"
+        if end_date:
+            date_info += f" to {end_date}"
+        date_info += ")"
+
     await update.message.reply_text(
-        f"⚙️ Setup for **{event_name}**:\n\n"
+        f"⚙️ Setup for **{event_name}**{date_info}:\n\n"
         "Do you want to schedule by specific **Time Slots** (e.g., 9:00 AM) or **Whole Days**?",
         reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
@@ -99,10 +138,24 @@ async def finalize_event_creation(update: Update, context: ContextTypes.DEFAULT_
     setup_id = "_".join(data[2:]) # Reconstruct ID
     
     draft_key = f"draft_{setup_id}"
-    event_name = events_db.get(draft_key, "New Event")
+    draft_data = events_db.get(draft_key)
     
-    # Clean up draft
-    if draft_key in events_db:
+    if not draft_data:
+        # Fallback if draft is missing (unlikely unless restart)
+        event_name = "New Event"
+        start_date = None
+        end_date = None
+    else:
+        # Handle if draft was old string format (backward compatibility) or new dict
+        if isinstance(draft_data, str):
+            event_name = draft_data
+            start_date = None
+            end_date = None
+        else:
+            event_name = draft_data.get("name", "New Event")
+            start_date = draft_data.get("start_date")
+            end_date = draft_data.get("end_date")
+
         del events_db[draft_key]
     
     # Create Real Event ID
@@ -110,13 +163,20 @@ async def finalize_event_creation(update: Update, context: ContextTypes.DEFAULT_
     
     events_db[event_id] = {
         "name": event_name, 
-        "mode": mode, 
+        "mode": mode,
+        "start_date": start_date,
+        "end_date": end_date,
         "votes": {}
     }
     save_data(events_db)
 
     # Generate Web App URL with Mode
-    full_url = f"{WEB_APP_URL}?eventId={event_id}&eventName={event_name}&mode={mode}"
+    # URL Encode parameters to ensure they work in Group Chats
+    # We remove eventName from URL to keep it short and safe. Frontend fetches it.
+    safe_event_id = urllib.parse.quote(str(event_id))
+
+    full_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={mode}"
+
     web_app = WebAppInfo(url=full_url)
     
     view_btn = InlineKeyboardButton("📊 View Results", callback_data=f"view_{event_id}")
@@ -127,6 +187,8 @@ async def finalize_event_creation(update: Update, context: ContextTypes.DEFAULT_
     ]
     
     mode_text = "Hourly Slots" if mode == "time" else "Whole Dates"
+    if start_date:
+        mode_text += f" ({start_date}...)"
     
     await query.message.edit_text(
         f"🗓 **{event_name}**\n"
@@ -193,20 +255,26 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # --- FASTAPI SERVER ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    application = Application.builder().token(TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("schedule", ask_event_mode)) # Changed handler!
-    application.add_handler(CallbackQueryHandler(finalize_event_creation, pattern="^setmode_"))
-    application.add_handler(CallbackQueryHandler(view_results, pattern="^view_"))
-    
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    yield
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
+    if TOKEN:
+        application = Application.builder().token(TOKEN).build()
+
+        application.add_handler(CommandHandler("start", start))
+        application.add_handler(CommandHandler("schedule", ask_event_mode))
+        application.add_handler(CallbackQueryHandler(finalize_event_creation, pattern="^setmode_"))
+        application.add_handler(CallbackQueryHandler(view_results, pattern="^view_"))
+
+        await application.initialize()
+        await application.start()
+        await application.updater.start_polling()
+        try:
+            yield
+        finally:
+            await application.updater.stop()
+            await application.stop()
+            await application.shutdown()
+    else:
+        logger.warning("No TOKEN found. Bot functionality is disabled, but API is running.")
+        yield
 
 app = FastAPI(lifespan=lifespan)
 
@@ -224,6 +292,14 @@ async def serve_frontend():
             return HTMLResponse(content=f.read())
     except FileNotFoundError:
         return HTMLResponse(content="<h1>Error: index.html not found</h1>", status_code=404)
+
+@app.get("/get_event_data")
+async def get_event_data(eventId: str):
+    """API for the Web App to fetch event config and votes"""
+    event = events_db.get(eventId)
+    if not event:
+        return {"error": "Event not found"}
+    return event
 
 @app.post("/submit_availability")
 async def submit_availability(request: Request):

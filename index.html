@@ -23,7 +23,7 @@
         header { padding: 15px; text-align: center; border-bottom: 1px solid var(--secondary-bg); }
         
         /* --- TIME GRID STYLES --- */
-        .time-grid-wrapper { flex-grow: 1; overflow: auto; display: none; } /* Hidden by default */
+        .time-grid-wrapper { flex-grow: 1; overflow: auto; display: none; }
         .grid-container {
             display: grid;
             grid-template-columns: 50px repeat(5, 1fr); 
@@ -37,14 +37,29 @@
             background-color: var(--bg-color); font-size: 11px; text-align: right;
             padding-right: 8px; position: sticky; left: 0; z-index: 10;
         }
-        .slot { height: 35px; background-color: var(--bg-color); }
+        .slot { height: 35px; background-color: var(--bg-color); position: relative; }
 
-        /* --- CALENDAR STYLES (New) --- */
-        .calendar-wrapper { flex-grow: 1; overflow: auto; padding: 20px; display: none; }
+        /* --- CALENDAR STYLES --- */
+        .calendar-wrapper { flex-grow: 1; overflow: auto; padding: 15px; display: none; }
+
+        .cal-header {
+            display: flex; justify-content: space-between; align-items: center;
+            margin-bottom: 10px;
+        }
+        .cal-nav-btn {
+            background: none; border: none; font-size: 20px; cursor: pointer; color: var(--button-color);
+            padding: 5px 15px;
+        }
+        .cal-month-title { font-weight: bold; font-size: 16px; }
+
         .calendar-grid {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
-            gap: 8px;
+            gap: 5px;
+        }
+        .cal-day-header {
+            text-align: center; font-size: 11px; color: var(--text-color); opacity: 0.6;
+            margin-bottom: 5px;
         }
         .cal-day {
             aspect-ratio: 1;
@@ -53,16 +68,27 @@
             border-radius: 8px;
             font-size: 14px;
             cursor: pointer;
+            position: relative;
+            overflow: hidden;
         }
-        .cal-day-name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
-        
+        .cal-day.empty { background-color: transparent; cursor: default; }
+        .cal-day-name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; } /* Not used in grid view usually */
+
         /* --- SHARED INTERACTIVE --- */
-        .selected { background-color: var(--green) !important; color: white; }
-        
+        .selected {
+            box-shadow: inset 0 0 0 3px var(--button-color);
+        }
+        .selected::after {
+            content: '✓';
+            position: absolute; top: 2px; right: 2px; font-size: 10px;
+            color: var(--button-color); font-weight: bold;
+        }
+
         #loader {
             position: fixed; top: 0; left: 0; right: 0; bottom: 0; 
             background: rgba(0,0,0,0.5); display: none; 
             align-items: center; justify-content: center; color: white;
+            z-index: 100;
         }
     </style>
 </head>
@@ -81,74 +107,190 @@
 
     <!-- MODE 2: CALENDAR GRID -->
     <div id="date-view" class="calendar-wrapper">
-        <div id="calendar" class="calendar-grid"></div>
+        <div class="cal-header">
+            <button class="cal-nav-btn" id="prev-month">◀</button>
+            <span class="cal-month-title" id="month-label">Month Year</span>
+            <button class="cal-nav-btn" id="next-month">▶</button>
+        </div>
+        <div id="calendar" class="calendar-grid">
+            <!-- Headers -->
+            <div class="cal-day-header">Sun</div>
+            <div class="cal-day-header">Mon</div>
+            <div class="cal-day-header">Tue</div>
+            <div class="cal-day-header">Wed</div>
+            <div class="cal-day-header">Thu</div>
+            <div class="cal-day-header">Fri</div>
+            <div class="cal-day-header">Sat</div>
+            <!-- Days injected here -->
+        </div>
     </div>
 </div>
 
-<div id="loader">Saving...</div>
+<div id="loader">Processing...</div>
 
 <script>
     const tg = window.Telegram.WebApp;
     tg.expand(); 
 
-    const BACKEND_API_URL = ""; // Relative path
+    const BACKEND_API_URL = "";
 
     // Get Params
     const urlParams = new URLSearchParams(window.location.search);
-    const eventName = urlParams.get('eventName') || "Event";
     const eventId = urlParams.get('eventId');
-    const mode = urlParams.get('mode') || 'time'; // 'time' or 'date'
-
-    document.getElementById('event-title').innerText = eventName;
+    let mode = urlParams.get('mode') || 'time';
     
+    // We fetch eventName from API now
+    let eventName = "Event";
+
+    const userId = tg.initDataUnsafe.user?.id?.toString() || 'anon';
+
     // State
     const selectedSlots = new Set();
     let isDragging = false;
     let paintMode = true;
 
-    // --- INITIALIZATION ---
-    if (mode === 'date') {
-        initCalendar();
-    } else {
-        initTimeGrid();
+    // Calendar State
+    let currentMonthDate = new Date(); // Tracks the month being viewed
+    let eventStartDate = null;
+    let eventEndDate = null;
+
+    // Data Store
+    let globalSlotCounts = {};
+    let globalTotalVoters = 0;
+
+    // --- MAIN FLOW ---
+
+    async function loadData() {
+        if (!eventId) return null;
+        try {
+            const res = await fetch(`${BACKEND_API_URL}/get_event_data?eventId=${eventId}`);
+            return await res.json();
+        } catch (e) {
+            console.error(e);
+            return null;
+        }
     }
 
-    // --- RENDERERS ---
+    loadData().then(data => {
+        if (data && !data.error) {
+            eventName = data.name;
+            mode = data.mode;
+            document.getElementById('event-title').innerText = eventName;
+
+            if (data.start_date) eventStartDate = new Date(data.start_date);
+            if (data.end_date) eventEndDate = new Date(data.end_date);
+
+            // Set initial view to start date if exists
+            if (eventStartDate) {
+                currentMonthDate = new Date(eventStartDate);
+            }
+
+            // Process Votes
+            const votes = data.votes || {};
+            globalSlotCounts = {};
+            let totalVoters = 0;
+            const voters = new Set();
+
+            Object.keys(votes).forEach(uid => {
+                voters.add(uid);
+                votes[uid].forEach(slot => {
+                    globalSlotCounts[slot] = (globalSlotCounts[slot] || 0) + 1;
+                });
+                if (uid === userId) {
+                    votes[uid].forEach(s => selectedSlots.add(s));
+                }
+            });
+            globalTotalVoters = voters.size;
+
+            if (mode === 'date') {
+                initCalendar();
+            } else {
+                initTimeGrid();
+            }
+        } else {
+            // Fallback
+            document.getElementById('event-title').innerText = eventName;
+            if (mode === 'date') initCalendar();
+            else initTimeGrid();
+        }
+    });
+
+    // --- CALENDAR LOGIC ---
 
     function initCalendar() {
         document.getElementById('date-view').style.display = 'block';
-        document.getElementById('hint-text').innerText = "Tap dates you are available";
+        document.getElementById('hint-text').innerText = "Drag across dates to select";
         
-        const cal = document.getElementById('calendar');
-        const today = new Date();
-        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        renderMonth();
 
-        // Generate next 35 days
-        for (let i = 0; i < 35; i++) {
-            const date = new Date();
-            date.setDate(today.getDate() + i);
-            
-            const dateStr = date.toISOString().split('T')[0]; // "2023-11-27"
-            const dayName = days[date.getDay()];
-            const dayNum = date.getDate();
+        document.getElementById('prev-month').onclick = () => {
+            currentMonthDate.setMonth(currentMonthDate.getMonth() - 1);
+            renderMonth();
+        };
+        document.getElementById('next-month').onclick = () => {
+            currentMonthDate.setMonth(currentMonthDate.getMonth() + 1);
+            renderMonth();
+        };
+    }
+
+    function renderMonth() {
+        const year = currentMonthDate.getFullYear();
+        const month = currentMonthDate.getMonth(); // 0-indexed
+
+        const monthNames = ["January", "February", "March", "April", "May", "June",
+                           "July", "August", "September", "October", "November", "December"];
+
+        document.getElementById('month-label').innerText = `${monthNames[month]} ${year}`;
+
+        const calGrid = document.getElementById('calendar');
+        // Clear existing days (keep headers, which are first 7 children)
+        // Actually, easiest is to remove all .cal-day and .empty elements
+        const oldDays = calGrid.querySelectorAll('.cal-day, .empty');
+        oldDays.forEach(el => el.remove());
+
+        // First day of month
+        const firstDay = new Date(year, month, 1);
+        const startingDayOfWeek = firstDay.getDay(); // 0 (Sun) - 6 (Sat)
+
+        // Days in month
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+
+        // 1. Padding (Empty cells before start)
+        for (let i = 0; i < startingDayOfWeek; i++) {
+            const empty = document.createElement('div');
+            empty.className = 'cal-day empty';
+            calGrid.appendChild(empty);
+        }
+
+        // 2. Days
+        for (let d = 1; d <= daysInMonth; d++) {
+            const dateObj = new Date(year, month, d);
+            const dateStr = dateObj.toISOString().split('T')[0];
 
             const cell = document.createElement('div');
             cell.className = 'cal-day';
             cell.dataset.id = dateStr;
-            cell.innerHTML = `<span class="cal-day-name">${dayName}</span><span>${dayNum}</span>`;
+            cell.innerHTML = `<span>${d}</span>`;
             
-            cell.onclick = () => {
-                if (selectedSlots.has(dateStr)) {
-                    selectedSlots.delete(dateStr);
-                    cell.classList.remove('selected');
-                } else {
-                    selectedSlots.add(dateStr);
-                    cell.classList.add('selected');
-                }
-            };
-            cal.appendChild(cell);
+            // Check if within event range (if set)
+            // Optional: Dim days outside range? For now, we allow selecting any day unless blocked.
+            // But user asked for range. If range is strict, we should disable others.
+            // Let's assume soft range for now or just visual focus.
+
+            // Heatmap
+            applyHeatmap(cell, dateStr, globalSlotCounts, globalTotalVoters);
+
+            // Selection State
+            if (selectedSlots.has(dateStr)) cell.classList.add('selected');
+
+            // Drag Events
+            attachDragEvents(cell);
+
+            calGrid.appendChild(cell);
         }
     }
+
+    // --- TIME GRID LOGIC ---
 
     function initTimeGrid() {
         document.getElementById('time-view').style.display = 'block';
@@ -178,54 +320,87 @@
             for (let d = 0; d < dayLabels.length; d++) {
                 const slot = document.createElement('div');
                 slot.className = 'slot';
-                slot.dataset.id = `${d}-${h}`;
+                const id = `${d}-${h}`;
+                slot.dataset.id = id;
                 
-                // Drag Logic
-                slot.addEventListener('mousedown', startDrag);
-                slot.addEventListener('mouseenter', doDrag);
-                slot.addEventListener('touchstart', startTouch, {passive: false});
-                slot.addEventListener('touchmove', moveTouch, {passive: false});
+                // Heatmap
+                applyHeatmap(slot, id, globalSlotCounts, globalTotalVoters);
+
+                // Selection State
+                if (selectedSlots.has(id)) slot.classList.add('selected');
+
+                // Drag Events
+                attachDragEvents(slot);
                 
                 grid.appendChild(slot);
             }
         }
     }
 
-    // --- DRAG LOGIC (Time Mode Only) ---
+    function applyHeatmap(el, id, slotCounts, totalVoters) {
+        if (!totalVoters) return;
+        const count = slotCounts[id] || 0;
+        if (count > 0) {
+            const saturation = count / totalVoters;
+            el.style.backgroundColor = `rgba(76, 175, 80, ${saturation})`;
+        }
+    }
+
+    // --- DRAG LOGIC (Shared) ---
+    function attachDragEvents(el) {
+        el.addEventListener('mousedown', startDrag);
+        el.addEventListener('mouseenter', doDrag);
+        el.addEventListener('touchstart', startTouch, {passive: false});
+        el.addEventListener('touchmove', moveTouch, {passive: false});
+    }
+
     document.addEventListener('mouseup', () => isDragging = false);
     document.addEventListener('touchend', () => isDragging = false);
 
     function startDrag(e) {
+        e.preventDefault();
         isDragging = true;
-        paintMode = !e.target.classList.contains('selected');
-        toggleSlot(e.target);
+        const cell = e.currentTarget;
+        paintMode = !cell.classList.contains('selected');
+        toggleSlot(cell);
     }
-    function doDrag(e) { if (isDragging) toggleSlot(e.target); }
+
+    function doDrag(e) {
+        if (isDragging) toggleSlot(e.currentTarget);
+    }
     
     function startTouch(e) {
         if(e.cancelable) e.preventDefault();
         isDragging = true;
         const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (el?.classList.contains('slot')) {
-            paintMode = !el.classList.contains('selected');
-            toggleSlot(el);
+        const cell = el?.closest('.cal-day, .slot');
+        if (cell) {
+            paintMode = !cell.classList.contains('selected');
+            toggleSlot(cell);
         }
     }
+
     function moveTouch(e) {
         if(e.cancelable) e.preventDefault();
         if (!isDragging) return;
         const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (el?.classList.contains('slot')) toggleSlot(el);
+        const cell = el?.closest('.cal-day, .slot');
+        if (cell) toggleSlot(cell);
     }
 
     function toggleSlot(el) {
+        if (!el || el.classList.contains('empty')) return;
         const id = el.dataset.id;
         if (paintMode) {
-            el.classList.add('selected');
-            selectedSlots.add(id);
+            if (!selectedSlots.has(id)) {
+                el.classList.add('selected');
+                selectedSlots.add(id);
+            }
         } else {
-            el.classList.remove('selected');
-            selectedSlots.delete(id);
+            if (selectedSlots.has(id)) {
+                el.classList.remove('selected');
+                selectedSlots.delete(id);
+            }
         }
     }
 
@@ -235,13 +410,13 @@
 
     tg.MainButton.onClick(async () => {
         if (selectedSlots.size === 0) {
-            tg.showAlert("Please select at least one time!");
+            tg.showAlert("Please select at least one option!");
             return;
         }
 
         const payload = {
             eventId: eventId,
-            userId: tg.initDataUnsafe.user?.id || 'anon',
+            userId: userId,
             slots: Array.from(selectedSlots)
         };
 
