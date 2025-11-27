@@ -61,9 +61,17 @@ def generate_heatmap_image(event_data):
              for slot in user_votes:
                  slot_scores[slot] = slot_scores.get(slot, 0) + 1.0
         elif isinstance(user_votes, dict):
-            for slot, type_val in user_votes.items():
-                weight = 1.0 if type_val == 'yes' else 0.5
-                slot_scores[slot] = slot_scores.get(slot, 0) + weight
+            # If it's the wrapper dict {slots: ..., username: ...}
+            if "slots" in user_votes:
+                user_votes = user_votes["slots"]
+
+            if isinstance(user_votes, list):
+                 for slot in user_votes:
+                     slot_scores[slot] = slot_scores.get(slot, 0) + 1.0
+            elif isinstance(user_votes, dict):
+                for slot, type_val in user_votes.items():
+                    weight = 1.0 if type_val == 'yes' else 0.5
+                    slot_scores[slot] = slot_scores.get(slot, 0) + weight
 
     if not slot_scores:
         return None
@@ -72,7 +80,7 @@ def generate_heatmap_image(event_data):
     sorted_slots = sorted(slot_scores.keys())
 
     plt.figure(figsize=(10, 6))
-    
+
     # Logic differs slightly for Time Grid vs Date Grid
     # For simplicity, we'll plot a bar chart or a simple grid depending on data structure.
     # A true heatmap requires mapping slots to X/Y coordinates.
@@ -135,7 +143,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat = update.effective_chat
     args = context.args or []
-    
+
     # Check for Deep Link Args (setup_ or vote_)
     if args:
         if args[0].startswith("setup_"):
@@ -163,16 +171,30 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
 
-    # Standard Menu (Works in Groups and Private)
-    setup_url = f"{WEB_APP_URL}?mode=setup&chatId={chat.id}"
-    web_app = WebAppInfo(url=setup_url)
+    # Standard Menu
 
-    keyboard = [
-        [InlineKeyboardButton("➕ Create Event", web_app=web_app)],
-        [InlineKeyboardButton("📅 Active Events", callback_data="list_active_events")],
-        [InlineKeyboardButton("❓ Help", callback_data="show_help")]
-    ]
-    
+    # Logic: If Group Chat -> Use Deep Link to redirect to Private Chat for Web App
+    # If Private Chat -> Use Web App Button directly
+
+    if chat.type != Chat.PRIVATE:
+        # Group Chat: Send URL Button
+        bot_username = context.bot.username or (await context.bot.get_me()).username
+        deep_link = f"https://t.me/{bot_username}?start=setup_{chat.id}"
+        keyboard = [
+            [InlineKeyboardButton("➕ Create Event", url=deep_link)],
+            [InlineKeyboardButton("📅 Active Events", callback_data="list_active_events")],
+            [InlineKeyboardButton("❓ Help", callback_data="show_help")]
+        ]
+    else:
+        # Private Chat: Send Web App Button
+        setup_url = f"{WEB_APP_URL}?mode=setup&chatId={chat.id}"
+        web_app = WebAppInfo(url=setup_url)
+        keyboard = [
+            [InlineKeyboardButton("➕ Create Event", web_app=web_app)],
+            [InlineKeyboardButton("📅 Active Events", callback_data="list_active_events")],
+            [InlineKeyboardButton("❓ Help", callback_data="show_help")]
+        ]
+
     await update.message.reply_text(
         "👋 **When2Meet Bot**\n\nMain Menu:",
         reply_markup=InlineKeyboardMarkup(keyboard),
@@ -198,10 +220,15 @@ async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     else:
         msg_text = "📅 **Schedule Event**\n\nClick below to configure:"
 
-    setup_url = f"{WEB_APP_URL}?mode=setup&chatId={update.effective_chat.id}&setupId={setup_id}"
-    web_app = WebAppInfo(url=setup_url)
-    
-    keyboard = [[InlineKeyboardButton("⚙️ Configure Event", web_app=web_app)]]
+    chat = update.effective_chat
+    if chat.type != Chat.PRIVATE:
+        bot_username = context.bot.username or (await context.bot.get_me()).username
+        deep_link = f"https://t.me/{bot_username}?start=setup_{chat.id}"
+        keyboard = [[InlineKeyboardButton("⚙️ Configure Event", url=deep_link)]]
+    else:
+        setup_url = f"{WEB_APP_URL}?mode=setup&chatId={chat.id}&setupId={setup_id}"
+        web_app = WebAppInfo(url=setup_url)
+        keyboard = [[InlineKeyboardButton("⚙️ Configure Event", web_app=web_app)]]
     
     await update.message.reply_text(
         msg_text,
@@ -271,22 +298,25 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     # Check missing participants
     req_participants = event.get("required_participants", [])
-    missing = []
-    if req_participants:
-        # Convert votes keys (user IDs) to check against req_participants (usernames)
-        # We can't easily check IDs vs Usernames without resolving.
-        # Assumption: req_participants are strings like "@alice".
-        # But votes are keyed by UserID.
-        # Problem: We don't store UserID -> Username mapping.
-        # We can't strictly enforce Nudge without knowing who @alice is.
-        # However, if we assume the user is "waiting on X", we can just list those who haven't voted IF we had a mapping.
-        # Since we don't, we might have to rely on the user to know, OR update votes to store username?
-        # Let's check logic: "Reply with a message tagging the users who haven't voted yet".
-        # If we only have "@alice", we can list "@alice".
-        # But we don't know if @alice HAS voted unless we store her username in the vote.
-        pass
 
     keyboard = []
+
+    # Add Availability Button logic
+    # Since View Results works in groups, we must check if we are in a group to decide button type.
+    # However, 'view_results' is a callback. We can check query.message.chat.type
+    chat = query.message.chat
+    bot_username = context.bot.username or (await context.bot.get_me()).username
+
+    # Logic: Always provide "Add Availability" button
+    if chat.type != Chat.PRIVATE:
+        deep_link = f"https://t.me/{bot_username}?start=vote_{event_id}"
+        keyboard.append([InlineKeyboardButton("👉 Add Availability", url=deep_link)])
+    else:
+        safe_event_id = urllib.parse.quote(str(event_id))
+        full_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={event.get('mode', 'time')}"
+        web_app_vote = WebAppInfo(url=full_url)
+        keyboard.append([InlineKeyboardButton("👉 Add Availability", web_app=web_app_vote)])
+
     if req_participants:
         keyboard.append([InlineKeyboardButton("🔔 Nudge Missing", callback_data=f"nudge_{event_id}")])
 
@@ -310,7 +340,7 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def nudge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
+    
     event_id = query.data.replace("nudge_", "")
     event = events_db.get(event_id)
     if not event: return
@@ -324,13 +354,13 @@ async def nudge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Currently votes key is UserID. We don't have Usernames.
     # To fix this, we need to store Username in the vote payload from frontend.
     # The frontend knows the user's username? tg.initDataUnsafe.user.username
-
+    
     # We will implement logic assuming we can compare.
     # For now, since we can't perfectly map ID to Username without storing it,
     # we'll list ALL required participants and say "Waiting on..."
     # But that's annoying.
     # Better: Update /submit_availability to store username.
-    
+
     voted_usernames = set()
     for uid, data in event.get("votes", {}).items():
         # Check if we stored username. If not, we can't filter.
@@ -339,7 +369,7 @@ async def nudge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
             voted_usernames.add(f"@{data['username']}")
 
     missing = [p for p in req if p not in voted_usernames]
-    
+
     if missing:
         await query.message.reply_text(f"🔔 **Waiting on:**\n{' '.join(missing)}", parse_mode="Markdown")
     else:
@@ -468,12 +498,19 @@ async def create_event(request: Request):
     # Send Message
     if hasattr(app.state, "bot_app"):
         bot = app.state.bot_app.bot
-        safe_event_id = urllib.parse.quote(str(event_id))
-        full_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={mode}"
-        web_app_vote = WebAppInfo(url=full_url)
+
+        # Determine deep link vs web app button
+        # create_event is sent to the Group where the event is created.
+        # It's always a group? Not necessarily (could be private).
+        # But we assume the goal is to share in a group.
+        # Safest is to ALWAYS use Deep Link "Add Availability" in the announcement message.
+        # This guarantees it works in groups.
+
+        bot_username = bot.username or (await bot.get_me()).username
+        deep_link = f"https://t.me/{bot_username}?start=vote_{event_id}"
 
         view_btn = InlineKeyboardButton("📊 View Results", callback_data=f"view_{event_id}")
-        keyboard = [[InlineKeyboardButton("👉 Add Availability", web_app=web_app_vote)], [view_btn]]
+        keyboard = [[InlineKeyboardButton("👉 Add Availability", url=deep_link)], [view_btn]]
 
         mode_text = "Hourly Slots" if mode == "time" else "Whole Dates"
         extra = ""
