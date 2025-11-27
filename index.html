@@ -12,6 +12,9 @@
             --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
             --button-color: var(--tg-theme-button-color, #2481cc);
             --green: #4caf50;
+            --yellow: #ffc107;
+            --selected-yes: var(--green);
+            --selected-maybe: var(--yellow);
         }
         body {
             font-family: -apple-system, system-ui, sans-serif;
@@ -31,16 +34,12 @@
             font-size: 16px; background-color: var(--secondary-bg); color: var(--text-color);
             box-sizing: border-box;
         }
-        .mode-select {
-            display: flex; gap: 10px;
-        }
+        .mode-select { display: flex; gap: 10px; }
         .mode-option {
             flex: 1; padding: 10px; text-align: center; border: 1px solid var(--button-color);
             border-radius: 8px; cursor: pointer; color: var(--button-color);
         }
-        .mode-option.active {
-            background-color: var(--button-color); color: white;
-        }
+        .mode-option.active { background-color: var(--button-color); color: white; }
 
         /* --- NAVIGATION --- */
         .nav-header {
@@ -65,11 +64,13 @@
             background-color: var(--bg-color); font-weight: bold; font-size: 11px; text-align: center;
             padding: 10px 2px; position: sticky; top: 0; z-index: 20;
             display: flex; flex-direction: column; justify-content: center;
+            cursor: pointer;
         }
         .header-date { font-size: 9px; opacity: 0.7; font-weight: normal; }
         .time-col {
             background-color: var(--bg-color); font-size: 11px; text-align: right;
             padding-right: 8px; position: sticky; left: 0; z-index: 10;
+            cursor: pointer;
         }
         .slot { height: 35px; background-color: var(--bg-color); position: relative; }
 
@@ -82,26 +83,25 @@
         }
         .cal-day-header {
             text-align: center; font-size: 11px; color: var(--text-color); opacity: 0.6;
-            margin-bottom: 5px;
+            margin-bottom: 5px; cursor: pointer;
         }
         .cal-day {
             aspect-ratio: 1;
             display: flex; flex-direction: column; align-items: center; justify-content: center;
             background-color: var(--secondary-bg);
-            border-radius: 8px;
-            font-size: 14px;
-            cursor: pointer;
-            position: relative;
-            overflow: hidden;
+            border-radius: 8px; font-size: 14px; cursor: pointer; position: relative; overflow: hidden;
         }
         .cal-day.empty { background-color: transparent; cursor: default; }
         
         /* --- SHARED INTERACTIVE --- */
-        .selected { box-shadow: inset 0 0 0 3px var(--button-color); }
-        .selected::after {
+        .selected-yes { background-color: var(--selected-yes) !important; color: white; }
+        .selected-maybe { background-color: var(--selected-maybe) !important; color: black; }
+        
+        .selected-yes::after, .selected-maybe::after {
             content: '✓'; position: absolute; top: 2px; right: 2px; font-size: 10px;
-            color: var(--button-color); font-weight: bold;
+            font-weight: bold; color: inherit;
         }
+
         #loader {
             position: fixed; top: 0; left: 0; right: 0; bottom: 0; 
             background: rgba(0,0,0,0.5); display: none; 
@@ -118,7 +118,7 @@
 <div class="container">
     <header id="main-header">
         <h2 id="event-title">Loading...</h2>
-        <p class="hint" id="hint-text">Select your availability</p>
+        <p class="hint" id="hint-text">1 Tap: Available, 2 Taps: Maybe</p>
     </header>
 
     <div id="error-msg">
@@ -180,7 +180,7 @@
 <div id="loader">Processing...</div>
 
 <script>
-    // Global Error Handler for better debugging on mobile
+    // Global Error Handler
     window.onerror = function(message, source, lineno, colno, error) {
         document.getElementById('error-msg').style.display = 'block';
         document.getElementById('error-text').innerText = "JS Error: " + message;
@@ -190,27 +190,27 @@
     const tg = window.Telegram.WebApp;
     tg.expand(); 
 
-    // Explicitly handle empty string by defaulting to window origin if needed,
-    // but fetch handles relative paths automatically.
     const BACKEND_API_URL = "";
 
     // --- INITIALIZATION ---
-    // Extract parameters immediately to avoid TDZ issues
     const urlParams = new URLSearchParams(window.location.search);
     const modeParam = urlParams.get('mode');
     const chatId = urlParams.get('chatId');
     const eventId = urlParams.get('eventId');
-    
-    // Debugging
-    console.log("Params:", Object.fromEntries(urlParams.entries()));
+    const setupId = urlParams.get('setupId');
 
     // Shared State
     let mode = modeParam || 'time';
     let eventName = "Event";
     const userId = tg.initDataUnsafe.user?.id?.toString() || 'anon';
-    const selectedSlots = new Set();
+    const username = tg.initDataUnsafe.user?.username || "";
+
+    // State Map: slotId -> 'yes' | 'maybe'
+    const selectedSlots = new Map();
+    
     let isDragging = false;
-    let paintMode = true;
+    let dragType = 'yes'; // 'yes' or 'maybe' or 'clear'
+
     let currentMonthDate = new Date();
     let currentWeekStart = new Date();
     currentMonthDate.setHours(0,0,0,0);
@@ -218,7 +218,8 @@
     const day = currentWeekStart.getDay();
     const diff = currentWeekStart.getDate() - day + (day === 0 ? -6 : 1);
     currentWeekStart.setDate(diff);
-    let globalSlotCounts = {};
+
+    let globalSlotScores = {}; // Sum of weights
     let globalTotalVoters = 0;
 
     // Setup State
@@ -235,7 +236,6 @@
     function initSetup() {
         document.getElementById('setup-view').style.display = 'block';
         document.getElementById('event-title').innerText = "Create Event";
-        document.getElementById('hint-text').innerText = "Fill details to start";
         
         tg.MainButton.setText("CREATE EVENT");
         tg.MainButton.show();
@@ -255,12 +255,13 @@
                 mode: setupModeVal,
                 start_date: start || null,
                 end_date: end || null,
-                chat_id: chatId
+                chat_id: chatId,
+                setup_id: setupId
             };
-
+            
             document.getElementById('loader').style.display = 'flex';
             tg.MainButton.hide();
-            
+
             try {
                 const res = await fetch(`${BACKEND_API_URL}/create_event`, {
                     method: 'POST',
@@ -295,10 +296,8 @@
 
     async function loadData() {
         if (!eventId) throw new Error("Missing Event ID");
-
-        // Timeout protection
         const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 sec timeout
+        const timeoutId = setTimeout(() => controller.abort(), 10000);
 
         try {
             const res = await fetch(`${BACKEND_API_URL}/get_event_data?eventId=${eventId}`, {
@@ -330,17 +329,32 @@
                 }
 
                 const votes = data.votes || {};
-                globalSlotCounts = {};
+                globalSlotScores = {};
                 let totalVoters = 0;
                 const voters = new Set();
 
+                // Parse Votes (handle Legacy List and New Dict)
                 Object.keys(votes).forEach(uid => {
                     voters.add(uid);
-                    votes[uid].forEach(slot => {
-                        globalSlotCounts[slot] = (globalSlotCounts[slot] || 0) + 1;
-                    });
-                    if (uid === userId) {
-                        votes[uid].forEach(s => selectedSlots.add(s));
+                    let userSlots = votes[uid];
+                    // Handle wrapped object if needed (for username)
+                    if (userSlots.slots) {
+                        userSlots = userSlots.slots;
+                    }
+
+                    if (Array.isArray(userSlots)) {
+                        // Legacy: List of strings (assumed 'yes')
+                        userSlots.forEach(slot => {
+                            globalSlotScores[slot] = (globalSlotScores[slot] || 0) + 1.0;
+                            if (uid === userId) selectedSlots.set(slot, 'yes');
+                        });
+                    } else if (typeof userSlots === 'object') {
+                        // New: Dict {slotId: type}
+                        Object.entries(userSlots).forEach(([slot, type]) => {
+                            let weight = (type === 'yes') ? 1.0 : 0.5;
+                            globalSlotScores[slot] = (globalSlotScores[slot] || 0) + weight;
+                            if (uid === userId) selectedSlots.set(slot, type);
+                        });
                     }
                 });
                 globalTotalVoters = voters.size;
@@ -383,7 +397,8 @@
         const payload = {
             eventId: eventId,
             userId: userId,
-            slots: Array.from(selectedSlots)
+            username: username,
+            slots: Object.fromEntries(selectedSlots)
         };
         document.getElementById('loader').style.display = 'flex';
         try {
@@ -402,7 +417,6 @@
     // --- CALENDAR LOGIC ---
     function initCalendar() {
         document.getElementById('date-view').style.display = 'block';
-        document.getElementById('hint-text').innerText = "Drag across dates to select";
         renderMonth();
         document.getElementById('prev-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() - 1); renderMonth(); };
         document.getElementById('next-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() + 1); renderMonth(); };
@@ -427,8 +441,8 @@
             const dateStr = dateObj.toISOString().split('T')[0];
             const cell = document.createElement('div');
             cell.className = 'cal-day'; cell.dataset.id = dateStr; cell.innerHTML = `<span>${d}</span>`;
-            applyHeatmap(cell, dateStr, globalSlotCounts, globalTotalVoters);
-            if (selectedSlots.has(dateStr)) cell.classList.add('selected');
+            applyHeatmap(cell, dateStr);
+            updateSlotVisual(cell, dateStr);
             attachDragEvents(cell);
             calGrid.appendChild(cell);
         }
@@ -437,7 +451,6 @@
     // --- TIME GRID LOGIC ---
     function initTimeGrid() {
         document.getElementById('time-view').style.display = 'block';
-        document.getElementById('hint-text').innerText = "Drag to paint times";
         renderTimeGrid();
         document.getElementById('prev-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() - 7); renderTimeGrid(); };
         document.getElementById('next-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() + 7); renderTimeGrid(); };
@@ -448,56 +461,151 @@
         const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
         const dates = [];
         const corner = document.createElement('div'); corner.className = 'header-cell'; grid.appendChild(corner);
+
         for (let i = 0; i < 7; i++) {
             const d = new Date(currentWeekStart); d.setDate(currentWeekStart.getDate() + i); dates.push(d);
             const h = document.createElement('div'); h.className = 'header-cell';
             const dateStr = `${d.getDate()}/${d.getMonth()+1}`;
             h.innerHTML = `<span>${days[i]}</span><span class="header-date">${dateStr}</span>`;
+
+            // Bulk Select Column
+            h.onclick = () => bulkSelect('col', i, dates);
+
             grid.appendChild(h);
         }
+
         const endWeek = new Date(dates[6]);
         const startStr = `${dates[0].getDate()} ${dates[0].toLocaleString('default', {month:'short'})}`;
         const endStr = `${endWeek.getDate()} ${endWeek.toLocaleString('default', {month:'short'})}`;
         document.getElementById('week-label').innerText = `${startStr} - ${endStr}`;
+
         for (let h = 8; h < 22; h++) {
-            const timeCol = document.createElement('div'); timeCol.className = 'time-col'; timeCol.innerText = `${h}:00`; grid.appendChild(timeCol);
+            const timeCol = document.createElement('div'); timeCol.className = 'time-col'; timeCol.innerText = `${h}:00`;
+
+            // Bulk Select Row
+            timeCol.onclick = () => bulkSelect('row', h, dates);
+
+            grid.appendChild(timeCol);
             for (let i = 0; i < 7; i++) {
                 const dateStr = dates[i].toISOString().split('T')[0];
                 const slotId = `${dateStr}-${h}`;
                 const slot = document.createElement('div'); slot.className = 'slot'; slot.dataset.id = slotId;
-                applyHeatmap(slot, slotId, globalSlotCounts, globalTotalVoters);
-                if (selectedSlots.has(slotId)) slot.classList.add('selected');
+                applyHeatmap(slot, slotId);
+                updateSlotVisual(slot, slotId);
                 attachDragEvents(slot);
                 grid.appendChild(slot);
             }
         }
     }
 
-    function applyHeatmap(el, id, slotCounts, totalVoters) {
-        if (!totalVoters) return;
-        const count = slotCounts[id] || 0;
-        if (count > 0) {
-            const saturation = count / totalVoters;
+    function bulkSelect(type, index, dates) {
+        // Toggle entire row/col. Logic: If majority selected, clear. Else fill 'yes'.
+        let ids = [];
+        if (type === 'col') {
+            const dateStr = dates[index].toISOString().split('T')[0];
+            for (let h = 8; h < 22; h++) ids.push(`${dateStr}-${h}`);
+        } else {
+            for (let i = 0; i < 7; i++) {
+                const dateStr = dates[i].toISOString().split('T')[0];
+                ids.push(`${dateStr}-${index}`);
+            }
+        }
+
+        // Count selected
+        let count = 0;
+        ids.forEach(id => { if (selectedSlots.has(id)) count++; });
+
+        const action = (count > ids.length / 2) ? 'clear' : 'yes';
+
+        ids.forEach(id => {
+            if (action === 'clear') selectedSlots.delete(id);
+            else selectedSlots.set(id, 'yes');
+
+            // Update Visual
+            const el = document.querySelector(`.slot[data-id="${id}"]`);
+            if (el) updateSlotVisual(el, id);
+        });
+    }
+
+    function applyHeatmap(el, id) {
+        if (!globalTotalVoters) return;
+        const score = globalSlotScores[id] || 0;
+        if (score > 0) {
+            const saturation = score / globalTotalVoters;
             el.style.backgroundColor = `rgba(76, 175, 80, ${saturation})`;
         }
     }
 
-    // --- DRAG LOGIC (Shared) ---
+    function updateSlotVisual(el, id) {
+        el.classList.remove('selected-yes', 'selected-maybe');
+        if (selectedSlots.has(id)) {
+            const type = selectedSlots.get(id);
+            if (type === 'yes') el.classList.add('selected-yes');
+            else if (type === 'maybe') el.classList.add('selected-maybe');
+        }
+    }
+
+    // --- DRAG LOGIC ---
     function attachDragEvents(el) {
         el.addEventListener('mousedown', startDrag); el.addEventListener('mouseenter', doDrag);
         el.addEventListener('touchstart', startTouch, {passive: false}); el.addEventListener('touchmove', moveTouch, {passive: false});
     }
     document.addEventListener('mouseup', () => isDragging = false);
     document.addEventListener('touchend', () => isDragging = false);
-    function startDrag(e) { if(e.cancelable) e.preventDefault(); isDragging = true; const cell = e.currentTarget; paintMode = !cell.classList.contains('selected'); toggleSlot(cell); }
-    function doDrag(e) { if (isDragging) toggleSlot(e.currentTarget); }
-    function startTouch(e) { if(e.cancelable) e.preventDefault(); isDragging = true; const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY); const cell = el?.closest('.cal-day, .slot'); if (cell) { paintMode = !cell.classList.contains('selected'); toggleSlot(cell); } }
-    function moveTouch(e) { if(e.cancelable) e.preventDefault(); if (!isDragging) return; const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY); const cell = el?.closest('.cal-day, .slot'); if (cell) toggleSlot(cell); }
-    function toggleSlot(el) {
+
+    function cycleState(id) {
+        if (!selectedSlots.has(id)) return 'yes';
+        if (selectedSlots.get(id) === 'yes') return 'maybe';
+        return 'clear';
+    }
+
+    function startDrag(e) {
+        if(e.cancelable) e.preventDefault();
+        isDragging = true;
+        const cell = e.currentTarget;
+        const id = cell.dataset.id;
+
+        // Determine drag type based on cycle of clicked cell
+        dragType = cycleState(id);
+
+        applyState(cell, id, dragType);
+    }
+
+    function doDrag(e) {
+        if (isDragging) {
+            const cell = e.currentTarget;
+            applyState(cell, cell.dataset.id, dragType);
+        }
+    }
+
+    function startTouch(e) {
+        if(e.cancelable) e.preventDefault();
+        isDragging = true;
+        const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+        const cell = el?.closest('.cal-day, .slot');
+        if (cell) {
+            const id = cell.dataset.id;
+            dragType = cycleState(id);
+            applyState(cell, id, dragType);
+        }
+    }
+
+    function moveTouch(e) {
+        if(e.cancelable) e.preventDefault();
+        if (!isDragging) return;
+        const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
+        const cell = el?.closest('.cal-day, .slot');
+        if (cell) applyState(cell, cell.dataset.id, dragType);
+    }
+
+    function applyState(el, id, type) {
         if (!el || el.classList.contains('empty')) return;
-        const id = el.dataset.id;
-        if (paintMode) { if (!selectedSlots.has(id)) { el.classList.add('selected'); selectedSlots.add(id); } }
-        else { if (selectedSlots.has(id)) { el.classList.remove('selected'); selectedSlots.delete(id); } }
+        if (type === 'clear') {
+            selectedSlots.delete(id);
+        } else {
+            selectedSlots.set(id, type);
+        }
+        updateSlotVisual(el, id);
     }
 </script>
 </body>
