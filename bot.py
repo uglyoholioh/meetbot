@@ -1,7 +1,8 @@
 import logging
 import os
 import json
-import datetime
+import re
+import urllib.parse
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
 from fastapi import FastAPI, Request
@@ -9,71 +10,89 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from contextlib import asynccontextmanager
+from supabase import create_client, Client
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "")
-DATA_FILE = "storage.json"
+
+# --- SUPABASE SETUP ---
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
+supabase: Client = None
+
+if SUPABASE_URL and SUPABASE_KEY:
+    supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+else:
+    print("⚠️ WARNING: Supabase credentials missing. Data will not be saved permanently!")
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- PERSISTENCE ---
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
+# --- DATABASE HELPERS ---
+def get_event(event_id):
+    """Fetches event data from Supabase"""
+    if not supabase: return {}
+    try:
+        response = supabase.table("events").select("event_data").eq("id", event_id).execute()
+        if response.data and len(response.data) > 0:
+            return response.data[0]["event_data"]
+        return None
+    except Exception as e:
+        logger.error(f"DB Load Error: {e}")
+        return None
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
+def save_event(event_id, data):
+    """Saves/Updates event data to Supabase"""
+    if not supabase: return
+    try:
+        # 'upsert' means Update if exists, Insert if new
+        supabase.table("events").upsert({"id": event_id, "event_data": data}).execute()
+    except Exception as e:
+        logger.error(f"DB Save Error: {e}")
 
-events_db = load_data()
-
-# --- HELPERS ---
-def parse_event_name(text: str, command: str) -> str:
-    """Robustly extracts event name from messages like '/schedule@bot Event Name'"""
-    # Remove the command part regardless of suffixes
+# --- COMMAND PARSER ---
+def parse_command_input(text: str):
+    if not text: return "", None, None
     parts = text.split(" ", 1)
-    if len(parts) > 1:
-        return parts[1].strip()
-    return ""
+    if len(parts) < 2: return "", None, None
+    raw_args = parts[1].strip()
+    date_pattern = r"(\d{4}-\d{2}-\d{2})"
+    dates = re.findall(date_pattern, raw_args)
+    start_date, end_date = None, None
+    if len(dates) >= 2:
+        start_date, end_date = dates[0], dates[1]
+        name = raw_args.replace(start_date, "").replace(end_date, "").strip()
+    elif len(dates) == 1:
+        start_date = dates[0]
+        name = raw_args.replace(start_date, "").strip()
+    else:
+        name = raw_args
+    return name.strip(" ,"), start_date, end_date
 
 # --- BOT LOGIC ---
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
-        "👋 **When2Meet Bot**\n\n"
-        "To start, type:\n`/schedule <Event Name>`\n\n"
-        "I support both **Time Slots** (hourly) and **Whole Dates**.",
+        "👋 **When2Meet Bot (Persistent)**\n\n"
+        "To start, type:\n`/schedule <Event Name>`",
         parse_mode="Markdown"
     )
 
 async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 1: User types /schedule, Bot asks for Mode (Time vs Date)"""
     text = update.message.text
-    event_name = parse_event_name(text, "/schedule")
+    event_name, start, end = parse_command_input(text)
     
     if not event_name:
-        await update.message.reply_text(
-            "⚠️ **Missing Event Name**\n\n"
-            "Usage: `/schedule Team Dinner`\n"
-            "Try typing it again!", 
-            parse_mode="Markdown"
-        )
+        await update.message.reply_text("⚠️ Usage: `/schedule Team Dinner`", parse_mode="Markdown")
         return
 
-    # Create a temp ID for this interaction
-    # Structure: "setup_ChatID_MsgID"
-    setup_id = f"{update.effective_chat.id}_{update.message.message_id}"
+    # Use a temporary ID for the setup phase
+    setup_id = f"setup_{update.effective_chat.id}_{update.message.message_id}"
     
-    # Store the name temporarily in context (or encode in callback data if short)
-    # We'll encode it in the callback to be stateless
-    # CALLBACK FORMAT: "mode_TYPE_EVENTNAME" (Careful with length, telegram limit is 64 bytes)
-    # Better approach: Save draft to DB
-    events_db[f"draft_{setup_id}"] = event_name
-    save_data(events_db)
+    # Save draft to DB temporarily
+    draft_data = {"name": event_name, "start_date": start, "end_date": end, "is_draft": True}
+    save_event(setup_id, draft_data)
 
     keyboard = [
         [
@@ -81,74 +100,64 @@ async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
             InlineKeyboardButton("📅 Whole Days", callback_data=f"setmode_date_{setup_id}")
         ]
     ]
-    
     await update.message.reply_text(
-        f"⚙️ Setup for **{event_name}**:\n\n"
-        "Do you want to schedule by specific **Time Slots** (e.g., 9:00 AM) or **Whole Days**?",
-        reply_markup=InlineKeyboardMarkup(keyboard),
-        parse_mode="Markdown"
+        f"⚙️ Setup for **{event_name}**:\nChoose Mode:",
+        reply_markup=InlineKeyboardMarkup(keyboard)
     )
 
 async def finalize_event_creation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Step 2: User clicks mode, Bot creates the final event"""
     query = update.callback_query
     await query.answer()
     
-    data = query.data.split("_") # ["setmode", "time", "setup_ID"]
-    mode = data[1]
-    setup_id = "_".join(data[2:]) # Reconstruct ID
+    # Data: ["setmode", "time", "setup_..."]
+    parts = query.data.split("_")
+    mode = parts[1]
+    setup_id = "_".join(parts[2:])
     
-    draft_key = f"draft_{setup_id}"
-    event_name = events_db.get(draft_key, "New Event")
-    
-    # Clean up draft
-    if draft_key in events_db:
-        del events_db[draft_key]
-    
+    # Retrieve draft
+    draft = get_event(setup_id)
+    if not draft:
+        draft = {"name": "New Event"} # Fallback
+
     # Create Real Event ID
     event_id = f"{query.message.chat.id}_{query.message.message_id}"
     
-    events_db[event_id] = {
-        "name": event_name, 
-        "mode": mode, 
+    final_event = {
+        "name": draft.get("name"),
+        "mode": mode,
+        "start_date": draft.get("start_date"),
+        "end_date": draft.get("end_date"),
         "votes": {}
     }
-    save_data(events_db)
-
-    # Generate Web App URL with Mode
-    full_url = f"{WEB_APP_URL}?eventId={event_id}&eventName={event_name}&mode={mode}"
-    web_app = WebAppInfo(url=full_url)
     
-    view_btn = InlineKeyboardButton("📊 View Results", callback_data=f"view_{event_id}")
+    # Save to Real ID
+    save_event(event_id, final_event)
+
+    # Encode for URL
+    safe_name = urllib.parse.quote(final_event["name"])
+    safe_id = urllib.parse.quote(event_id)
+    full_url = f"{WEB_APP_URL}?eventId={safe_id}&eventName={safe_name}&mode={mode}"
 
     keyboard = [
-        [InlineKeyboardButton("👉 Add Availability", web_app=web_app)],
-        [view_btn]
+        [InlineKeyboardButton("👉 Add Availability", web_app=WebAppInfo(url=full_url))],
+        [InlineKeyboardButton("📊 View Results", callback_data=f"view_{event_id}")]
     ]
     
-    mode_text = "Hourly Slots" if mode == "time" else "Whole Dates"
-    
     await query.message.edit_text(
-        f"🗓 **{event_name}**\n"
-        f"Mode: {mode_text}\n\n"
-        "Tap below to vote!",
-        reply_markup=InlineKeyboardMarkup(keyboard), 
+        f"🗓 **{final_event['name']}** created!\nTap below to vote.",
+        reply_markup=InlineKeyboardMarkup(keyboard),
         parse_mode="Markdown"
     )
 
 async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
-    # Parse ID: view_ChatID_MsgID
-    try:
-        event_id = query.data.replace("view_", "")
-        event = events_db.get(event_id)
-    except:
-        event = None
+    
+    event_id = query.data.replace("view_", "")
+    event = get_event(event_id)
 
     if not event:
-        await query.message.reply_text("❌ Event not found (it might be old).")
+        await query.message.reply_text("❌ Event not found in database.")
         return
 
     votes = event.get("votes", {})
@@ -156,74 +165,68 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.message.reply_text("❌ No votes recorded yet!")
         return
 
-    # Tally Votes
+    # Calculate Top Slots
     slot_counts = {}
     total_users = len(votes)
-    
-    for user, slots in votes.items():
-        for slot in slots:
+    for user_votes in votes.values():
+        for slot in user_votes:
             slot_counts[slot] = slot_counts.get(slot, 0) + 1
 
     sorted_slots = sorted(slot_counts.items(), key=lambda x: x[1], reverse=True)
     
-    # Format Message
-    msg = f"📊 **{event['name']}** ({total_users} voted)\n\n"
+    msg = f"📊 **{event['name']}** ({total_users} voted)\n\n🏆 **Best Times:**\n"
+    days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     
-    if event.get("mode") == "date":
-        # Date Mode Display
-        msg += "🏆 **Best Dates:**\n"
-        for slot, count in sorted_slots[:5]:
-            # slot is "YYYY-MM-DD"
-            msg += f"• {slot}: {count}/{total_users} votes\n"
-    else:
-        # Time Mode Display
-        days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
-        msg += "🏆 **Best Times:**\n"
-        for slot, count in sorted_slots[:5]:
-            # slot is "dayIndex-hour" (e.g., "0-9")
+    for slot, count in sorted_slots[:5]:
+        if event.get("mode") == "date":
+            msg += f"• {slot}: {count}/{total_users}\n"
+        else:
             try:
-                d_idx, hour = map(int, slot.split("-"))
-                day_name = days[d_idx] if d_idx < 7 else "Day"
-                msg += f"• {day_name} {hour}:00 : {count}/{total_users}\n"
-            except:
-                continue
+                d_idx, h = map(int, slot.split("-"))
+                d_name = days[d_idx] if d_idx < 7 else "Day"
+                msg += f"• {d_name} {h}:00 - {count}/{total_users}\n"
+            except: pass
 
     await query.message.reply_text(msg, parse_mode="Markdown")
 
-# --- FASTAPI SERVER ---
+# --- FASTAPI & LIFESPAN ---
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    application = Application.builder().token(TOKEN).build()
-    
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("schedule", ask_event_mode)) # Changed handler!
-    application.add_handler(CallbackQueryHandler(finalize_event_creation, pattern="^setmode_"))
-    application.add_handler(CallbackQueryHandler(view_results, pattern="^view_"))
-    
-    await application.initialize()
-    await application.start()
-    await application.updater.start_polling()
-    yield
-    await application.updater.stop()
-    await application.stop()
-    await application.shutdown()
+    if TOKEN:
+        app_bot = Application.builder().token(TOKEN).build()
+        app_bot.add_handler(CommandHandler("start", start))
+        app_bot.add_handler(CommandHandler("schedule", ask_event_mode))
+        app_bot.add_handler(CallbackQueryHandler(finalize_event_creation, pattern="^setmode_"))
+        app_bot.add_handler(CallbackQueryHandler(view_results, pattern="^view_"))
+        
+        await app_bot.initialize()
+        await app_bot.start()
+        await app_bot.updater.start_polling()
+        try: yield
+        finally:
+            await app_bot.updater.stop()
+            await app_bot.stop()
+            await app_bot.shutdown()
+    else:
+        yield
 
 app = FastAPI(lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
 )
 
 @app.get("/")
 async def serve_frontend():
     try:
-        with open("index.html", "r") as f:
-            return HTMLResponse(content=f.read())
-    except FileNotFoundError:
-        return HTMLResponse(content="<h1>Error: index.html not found</h1>", status_code=404)
+        with open("index.html", "r") as f: return HTMLResponse(content=f.read())
+    except FileNotFoundError: return HTMLResponse(content="<h1>Error: index.html not found</h1>", status_code=404)
+
+@app.get("/get_event_data")
+async def get_event_data(eventId: str):
+    data = get_event(eventId)
+    return data if data else {"error": "Event not found"}
 
 @app.post("/submit_availability")
 async def submit_availability(request: Request):
@@ -232,9 +235,16 @@ async def submit_availability(request: Request):
     user_id = str(data.get("userId"))
     slots = data.get("slots")
     
-    if event_id not in events_db:
+    # 1. Get current event
+    event = get_event(event_id)
+    if not event:
         return {"status": "error", "message": "Event not found"}
     
-    events_db[event_id]["votes"][user_id] = slots
-    save_data(events_db)
+    # 2. Update votes
+    if "votes" not in event: event["votes"] = {}
+    event["votes"][user_id] = slots
+    
+    # 3. Save back to DB
+    save_event(event_id, event)
+    
     return {"status": "success"}
