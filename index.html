@@ -12,6 +12,7 @@
             --secondary-bg: var(--tg-theme-secondary-bg-color, #f0f0f0);
             --button-color: var(--tg-theme-button-color, #2481cc);
             --green: #4caf50;
+            --heatmap-base: 76, 175, 80; /* RGB for green */
         }
         body {
             font-family: -apple-system, system-ui, sans-serif;
@@ -37,9 +38,9 @@
             background-color: var(--bg-color); font-size: 11px; text-align: right;
             padding-right: 8px; position: sticky; left: 0; z-index: 10;
         }
-        .slot { height: 35px; background-color: var(--bg-color); }
+        .slot { height: 35px; background-color: var(--bg-color); position: relative; }
 
-        /* --- CALENDAR STYLES (New) --- */
+        /* --- CALENDAR STYLES --- */
         .calendar-wrapper { flex-grow: 1; overflow: auto; padding: 20px; display: none; }
         .calendar-grid {
             display: grid;
@@ -53,16 +54,33 @@
             border-radius: 8px;
             font-size: 14px;
             cursor: pointer;
+            position: relative;
+            overflow: hidden;
         }
         .cal-day-name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
         
         /* --- SHARED INTERACTIVE --- */
-        .selected { background-color: var(--green) !important; color: white; }
+        /* Heatmap uses background-color. Selection uses border/shadow. */
+        .selected {
+            box-shadow: inset 0 0 0 3px var(--button-color); /* Inner border to show selection */
+        }
         
+        /* Icon to clearly indicate selection */
+        .selected::after {
+            content: '✓';
+            position: absolute;
+            top: 2px;
+            right: 2px;
+            font-size: 10px;
+            color: var(--button-color);
+            font-weight: bold;
+        }
+
         #loader {
             position: fixed; top: 0; left: 0; right: 0; bottom: 0; 
             background: rgba(0,0,0,0.5); display: none; 
             align-items: center; justify-content: center; color: white;
+            z-index: 100;
         }
     </style>
 </head>
@@ -85,72 +103,129 @@
     </div>
 </div>
 
-<div id="loader">Saving...</div>
+<div id="loader">Processing...</div>
 
 <script>
     const tg = window.Telegram.WebApp;
     tg.expand(); 
 
-    const BACKEND_API_URL = ""; // Relative path
+    const BACKEND_API_URL = "";
 
     // Get Params
     const urlParams = new URLSearchParams(window.location.search);
-    const eventName = urlParams.get('eventName') || "Event";
     const eventId = urlParams.get('eventId');
-    const mode = urlParams.get('mode') || 'time'; // 'time' or 'date'
-
-    document.getElementById('event-title').innerText = eventName;
     
+    // Fallback if URL params fail, though normally we expect data from API
+    let eventName = urlParams.get('eventName') || "Event";
+    let mode = urlParams.get('mode') || 'time';
+
+    const userId = tg.initDataUnsafe.user?.id?.toString() || 'anon';
+
     // State
     const selectedSlots = new Set();
     let isDragging = false;
-    let paintMode = true;
+    let paintMode = true; // true = adding, false = removing
 
-    // --- INITIALIZATION ---
-    if (mode === 'date') {
-        initCalendar();
-    } else {
-        initTimeGrid();
+    // --- MAIN FLOW ---
+
+    async function loadData() {
+        if (!eventId) return null;
+        try {
+            const res = await fetch(`${BACKEND_API_URL}/get_event_data?eventId=${eventId}`);
+            return await res.json();
+        } catch (e) {
+            console.error(e);
+            return null;
+        }
     }
+
+    loadData().then(data => {
+        if (data && !data.error) {
+            eventName = data.name;
+            mode = data.mode;
+            document.getElementById('event-title').innerText = eventName;
+
+            // Process Votes
+            const votes = data.votes || {};
+            const slotCounts = {};
+            let totalVoters = 0;
+            const voters = new Set();
+
+            Object.keys(votes).forEach(uid => {
+                voters.add(uid);
+                votes[uid].forEach(slot => {
+                    slotCounts[slot] = (slotCounts[slot] || 0) + 1;
+                });
+
+                // If it's me, pre-fill selection
+                if (uid === userId) {
+                    votes[uid].forEach(s => selectedSlots.add(s));
+                }
+            });
+            totalVoters = voters.size;
+
+            if (mode === 'date') {
+                initCalendar(data.start_date, data.end_date, slotCounts, totalVoters);
+            } else {
+                initTimeGrid(slotCounts, totalVoters);
+            }
+        } else {
+            // Fallback for new event or error
+            document.getElementById('event-title').innerText = eventName;
+            if (mode === 'date') initCalendar(null, null, {}, 0);
+            else initTimeGrid({}, 0);
+        }
+    });
 
     // --- RENDERERS ---
 
-    function initCalendar() {
+    function initCalendar(startDateStr, endDateStr, slotCounts, totalVoters) {
         document.getElementById('date-view').style.display = 'block';
-        document.getElementById('hint-text').innerText = "Tap dates you are available";
+        document.getElementById('hint-text').innerText = "Drag across dates you are available";
         
         const cal = document.getElementById('calendar');
-        const today = new Date();
         const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-        // Generate next 35 days
-        for (let i = 0; i < 35; i++) {
-            const date = new Date();
-            date.setDate(today.getDate() + i);
-            
-            const dateStr = date.toISOString().split('T')[0]; // "2023-11-27"
-            const dayName = days[date.getDay()];
-            const dayNum = date.getDate();
+        // Determine range
+        let start = startDateStr ? new Date(startDateStr) : new Date();
+        let end;
+
+        if (endDateStr) {
+            end = new Date(endDateStr);
+        } else {
+            end = new Date(start);
+            end.setDate(start.getDate() + 34); // Default 35 days
+        }
+
+        // Loop dates
+        let current = new Date(start);
+        while (current <= end) {
+            const dateStr = current.toISOString().split('T')[0];
+            const dayName = days[current.getDay()];
+            const dayNum = current.getDate();
 
             const cell = document.createElement('div');
             cell.className = 'cal-day';
             cell.dataset.id = dateStr;
             cell.innerHTML = `<span class="cal-day-name">${dayName}</span><span>${dayNum}</span>`;
             
-            cell.onclick = () => {
-                if (selectedSlots.has(dateStr)) {
-                    selectedSlots.delete(dateStr);
-                    cell.classList.remove('selected');
-                } else {
-                    selectedSlots.add(dateStr);
-                    cell.classList.add('selected');
-                }
-            };
+            // Heatmap
+            applyHeatmap(cell, dateStr, slotCounts, totalVoters);
+
+            // Selection State
+            if (selectedSlots.has(dateStr)) cell.classList.add('selected');
+
+            // Drag Events
+            attachDragEvents(cell);
+
             cal.appendChild(cell);
+
+            // Next day
+            current.setDate(current.getDate() + 1);
         }
     }
 
-    function initTimeGrid() {
+    function initTimeGrid(slotCounts, totalVoters) {
         document.getElementById('time-view').style.display = 'block';
         document.getElementById('hint-text').innerText = "Drag to paint times";
 
@@ -178,54 +253,92 @@
             for (let d = 0; d < dayLabels.length; d++) {
                 const slot = document.createElement('div');
                 slot.className = 'slot';
-                slot.dataset.id = `${d}-${h}`;
+                const id = `${d}-${h}`;
+                slot.dataset.id = id;
                 
-                // Drag Logic
-                slot.addEventListener('mousedown', startDrag);
-                slot.addEventListener('mouseenter', doDrag);
-                slot.addEventListener('touchstart', startTouch, {passive: false});
-                slot.addEventListener('touchmove', moveTouch, {passive: false});
+                // Heatmap
+                applyHeatmap(slot, id, slotCounts, totalVoters);
+
+                // Selection State
+                if (selectedSlots.has(id)) slot.classList.add('selected');
+
+                // Drag Events
+                attachDragEvents(slot);
                 
                 grid.appendChild(slot);
             }
         }
     }
 
-    // --- DRAG LOGIC (Time Mode Only) ---
+    function applyHeatmap(el, id, slotCounts, totalVoters) {
+        if (!totalVoters) return;
+        const count = slotCounts[id] || 0;
+        if (count > 0) {
+            const saturation = count / totalVoters;
+            // Green with opacity. Min 0.1 opacity so it's visible.
+            el.style.backgroundColor = `rgba(76, 175, 80, ${saturation})`;
+        }
+    }
+
+    // --- DRAG LOGIC (Shared) ---
+    function attachDragEvents(el) {
+        el.addEventListener('mousedown', startDrag);
+        el.addEventListener('mouseenter', doDrag);
+        el.addEventListener('touchstart', startTouch, {passive: false});
+        el.addEventListener('touchmove', moveTouch, {passive: false});
+    }
+
     document.addEventListener('mouseup', () => isDragging = false);
     document.addEventListener('touchend', () => isDragging = false);
 
     function startDrag(e) {
+        // Prevent text selection
+        e.preventDefault();
         isDragging = true;
-        paintMode = !e.target.classList.contains('selected');
-        toggleSlot(e.target);
+        // Determine paint mode based on the *first* cell clicked
+        // If it's already selected, we are erasing. Else painting.
+        // We use 'currentTarget' because 'target' might be a child span
+        const cell = e.currentTarget;
+        paintMode = !cell.classList.contains('selected');
+        toggleSlot(cell);
     }
-    function doDrag(e) { if (isDragging) toggleSlot(e.target); }
+
+    function doDrag(e) {
+        if (isDragging) toggleSlot(e.currentTarget);
+    }
     
     function startTouch(e) {
         if(e.cancelable) e.preventDefault();
         isDragging = true;
         const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (el?.classList.contains('slot')) {
-            paintMode = !el.classList.contains('selected');
-            toggleSlot(el);
+        const cell = el?.closest('.cal-day, .slot');
+        if (cell) {
+            paintMode = !cell.classList.contains('selected');
+            toggleSlot(cell);
         }
     }
+
     function moveTouch(e) {
         if(e.cancelable) e.preventDefault();
         if (!isDragging) return;
         const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (el?.classList.contains('slot')) toggleSlot(el);
+        const cell = el?.closest('.cal-day, .slot');
+        if (cell) toggleSlot(cell);
     }
 
     function toggleSlot(el) {
+        if (!el) return;
         const id = el.dataset.id;
         if (paintMode) {
-            el.classList.add('selected');
-            selectedSlots.add(id);
+            if (!selectedSlots.has(id)) {
+                el.classList.add('selected');
+                selectedSlots.add(id);
+            }
         } else {
-            el.classList.remove('selected');
-            selectedSlots.delete(id);
+            if (selectedSlots.has(id)) {
+                el.classList.remove('selected');
+                selectedSlots.delete(id);
+            }
         }
     }
 
@@ -235,13 +348,13 @@
 
     tg.MainButton.onClick(async () => {
         if (selectedSlots.size === 0) {
-            tg.showAlert("Please select at least one time!");
+            tg.showAlert("Please select at least one option!");
             return;
         }
 
         const payload = {
             eventId: eventId,
-            userId: tg.initDataUnsafe.user?.id || 'anon',
+            userId: userId,
             slots: Array.from(selectedSlots)
         };
 

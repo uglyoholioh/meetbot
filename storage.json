@@ -1,0 +1,1 @@
+{"test_group_1": {"name": "Test Event", "mode": "date", "start_date": "2023-11-01", "end_date": "2023-11-05", "votes": {"user123": ["2023-11-01", "2023-11-02"]}}}
