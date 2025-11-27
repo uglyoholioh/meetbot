@@ -22,29 +22,67 @@
         .container { display: flex; flex-direction: column; height: 100vh; }
         header { padding: 15px; text-align: center; border-bottom: 1px solid var(--secondary-bg); }
         
+        /* --- SETUP FORM STYLES --- */
+        .setup-wrapper { padding: 20px; display: none; }
+        .form-group { margin-bottom: 15px; }
+        .form-label { display: block; margin-bottom: 5px; font-weight: bold; font-size: 14px; }
+        .form-input {
+            width: 100%; padding: 10px; border: 1px solid #ccc; border-radius: 8px;
+            font-size: 16px; background-color: var(--secondary-bg); color: var(--text-color);
+            box-sizing: border-box;
+        }
+        .mode-select {
+            display: flex; gap: 10px;
+        }
+        .mode-option {
+            flex: 1; padding: 10px; text-align: center; border: 1px solid var(--button-color);
+            border-radius: 8px; cursor: pointer; color: var(--button-color);
+        }
+        .mode-option.active {
+            background-color: var(--button-color); color: white;
+        }
+
+        /* --- NAVIGATION --- */
+        .nav-header {
+            display: flex; justify-content: space-between; align-items: center;
+            padding: 10px 15px; border-bottom: 1px solid var(--secondary-bg);
+        }
+        .nav-btn {
+            background: none; border: none; font-size: 20px; cursor: pointer; color: var(--button-color);
+            padding: 5px 15px;
+        }
+        .nav-title { font-weight: bold; font-size: 15px; }
+
         /* --- TIME GRID STYLES --- */
-        .time-grid-wrapper { flex-grow: 1; overflow: auto; display: none; } /* Hidden by default */
+        .time-grid-wrapper { flex-grow: 1; overflow: auto; display: none; }
         .grid-container {
             display: grid;
-            grid-template-columns: 50px repeat(5, 1fr); 
+            grid-template-columns: 50px repeat(7, 1fr);
             gap: 1px; background-color: var(--secondary-bg); border-top: 1px solid var(--secondary-bg);
+            min-width: 320px;
         }
         .header-cell {
-            background-color: var(--bg-color); font-weight: bold; font-size: 13px; text-align: center;
+            background-color: var(--bg-color); font-weight: bold; font-size: 11px; text-align: center;
             padding: 10px 2px; position: sticky; top: 0; z-index: 20;
+            display: flex; flex-direction: column; justify-content: center;
         }
+        .header-date { font-size: 9px; opacity: 0.7; font-weight: normal; }
         .time-col {
             background-color: var(--bg-color); font-size: 11px; text-align: right;
             padding-right: 8px; position: sticky; left: 0; z-index: 10;
         }
-        .slot { height: 35px; background-color: var(--bg-color); }
+        .slot { height: 35px; background-color: var(--bg-color); position: relative; }
 
-        /* --- CALENDAR STYLES (New) --- */
-        .calendar-wrapper { flex-grow: 1; overflow: auto; padding: 20px; display: none; }
+        /* --- CALENDAR STYLES --- */
+        .calendar-wrapper { flex-grow: 1; overflow: auto; padding: 15px; display: none; }
         .calendar-grid {
             display: grid;
             grid-template-columns: repeat(7, 1fr);
-            gap: 8px;
+            gap: 5px;
+        }
+        .cal-day-header {
+            text-align: center; font-size: 11px; color: var(--text-color); opacity: 0.6;
+            margin-bottom: 5px;
         }
         .cal-day {
             aspect-ratio: 1;
@@ -53,200 +91,301 @@
             border-radius: 8px;
             font-size: 14px;
             cursor: pointer;
+            position: relative;
+            overflow: hidden;
         }
-        .cal-day-name { font-size: 10px; opacity: 0.7; margin-bottom: 2px; }
+        .cal-day.empty { background-color: transparent; cursor: default; }
         
         /* --- SHARED INTERACTIVE --- */
-        .selected { background-color: var(--green) !important; color: white; }
-        
+        .selected { box-shadow: inset 0 0 0 3px var(--button-color); }
+        .selected::after {
+            content: '✓'; position: absolute; top: 2px; right: 2px; font-size: 10px;
+            color: var(--button-color); font-weight: bold;
+        }
         #loader {
             position: fixed; top: 0; left: 0; right: 0; bottom: 0; 
             background: rgba(0,0,0,0.5); display: none; 
             align-items: center; justify-content: center; color: white;
+            z-index: 100;
+        }
+        #error-msg {
+            color: red; text-align: center; display: none; padding: 20px;
         }
     </style>
 </head>
 <body>
 
 <div class="container">
-    <header>
+    <header id="main-header">
         <h2 id="event-title">Loading...</h2>
         <p class="hint" id="hint-text">Select your availability</p>
     </header>
 
+    <div id="error-msg">
+        <p id="error-text">Failed to load event.</p>
+        <button onclick="window.location.reload()" class="nav-btn" style="border: 1px solid;">Retry</button>
+    </div>
+
+    <!-- SETUP FORM -->
+    <div id="setup-view" class="setup-wrapper">
+        <div class="form-group">
+            <label class="form-label">Event Name</label>
+            <input type="text" id="setup-name" class="form-input" placeholder="e.g. Team Dinner">
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Mode</label>
+            <div class="mode-select">
+                <div class="mode-option active" id="mode-time" onclick="setSetupMode('time')">Time Slots</div>
+                <div class="mode-option" id="mode-date" onclick="setSetupMode('date')">Whole Days</div>
+            </div>
+        </div>
+
+        <div class="form-group">
+            <label class="form-label">Start Date (Optional)</label>
+            <input type="date" id="setup-start" class="form-input">
+        </div>
+        <div class="form-group">
+            <label class="form-label">End Date (Optional)</label>
+            <input type="date" id="setup-end" class="form-input">
+        </div>
+    </div>
+
     <!-- MODE 1: TIME GRID -->
     <div id="time-view" class="time-grid-wrapper">
+        <div class="nav-header">
+            <button class="nav-btn" id="prev-week">◀</button>
+            <span class="nav-title" id="week-label">Week View</span>
+            <button class="nav-btn" id="next-week">▶</button>
+        </div>
         <div id="grid" class="grid-container"></div>
     </div>
 
     <!-- MODE 2: CALENDAR GRID -->
     <div id="date-view" class="calendar-wrapper">
-        <div id="calendar" class="calendar-grid"></div>
+        <div class="nav-header">
+            <button class="nav-btn" id="prev-month">◀</button>
+            <span class="nav-title" id="month-label">Month Year</span>
+            <button class="nav-btn" id="next-month">▶</button>
+        </div>
+        <div id="calendar" class="calendar-grid">
+            <div class="cal-day-header">Sun</div><div class="cal-day-header">Mon</div>
+            <div class="cal-day-header">Tue</div><div class="cal-day-header">Wed</div>
+            <div class="cal-day-header">Thu</div><div class="cal-day-header">Fri</div>
+            <div class="cal-day-header">Sat</div>
+        </div>
     </div>
 </div>
 
-<div id="loader">Saving...</div>
+<div id="loader">Processing...</div>
 
 <script>
+    // Global Error Handler for better debugging on mobile
+    window.onerror = function(message, source, lineno, colno, error) {
+        document.getElementById('error-msg').style.display = 'block';
+        document.getElementById('error-text').innerText = "JS Error: " + message;
+        return false;
+    };
+
     const tg = window.Telegram.WebApp;
     tg.expand(); 
 
-    const BACKEND_API_URL = ""; // Relative path
+    // Explicitly handle empty string by defaulting to window origin if needed,
+    // but fetch handles relative paths automatically.
+    const BACKEND_API_URL = "";
 
-    // Get Params
+    // --- INITIALIZATION ---
+    // Extract parameters immediately to avoid TDZ issues
     const urlParams = new URLSearchParams(window.location.search);
-    const eventName = urlParams.get('eventName') || "Event";
+    const modeParam = urlParams.get('mode');
+    const chatId = urlParams.get('chatId');
     const eventId = urlParams.get('eventId');
-    const mode = urlParams.get('mode') || 'time'; // 'time' or 'date'
-
-    document.getElementById('event-title').innerText = eventName;
     
-    // State
+    // Debugging
+    console.log("Params:", Object.fromEntries(urlParams.entries()));
+
+    // Shared State
+    let mode = modeParam || 'time';
+    let eventName = "Event";
+    const userId = tg.initDataUnsafe.user?.id?.toString() || 'anon';
     const selectedSlots = new Set();
     let isDragging = false;
     let paintMode = true;
+    let currentMonthDate = new Date();
+    let currentWeekStart = new Date();
+    currentMonthDate.setHours(0,0,0,0);
+    currentWeekStart.setHours(0,0,0,0);
+    const day = currentWeekStart.getDay();
+    const diff = currentWeekStart.getDate() - day + (day === 0 ? -6 : 1);
+    currentWeekStart.setDate(diff);
+    let globalSlotCounts = {};
+    let globalTotalVoters = 0;
 
-    // --- INITIALIZATION ---
-    if (mode === 'date') {
-        initCalendar();
+    // Setup State
+    let setupModeVal = 'time';
+
+    // Route logic
+    if (modeParam === 'setup') {
+        initSetup();
     } else {
-        initTimeGrid();
+        initVoting();
     }
 
-    // --- RENDERERS ---
-
-    function initCalendar() {
-        document.getElementById('date-view').style.display = 'block';
-        document.getElementById('hint-text').innerText = "Tap dates you are available";
+    // --- SETUP FUNCTIONS ---
+    function initSetup() {
+        document.getElementById('setup-view').style.display = 'block';
+        document.getElementById('event-title').innerText = "Create Event";
+        document.getElementById('hint-text').innerText = "Fill details to start";
         
-        const cal = document.getElementById('calendar');
-        const today = new Date();
-        const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+        tg.MainButton.setText("CREATE EVENT");
+        tg.MainButton.show();
 
-        // Generate next 35 days
-        for (let i = 0; i < 35; i++) {
-            const date = new Date();
-            date.setDate(today.getDate() + i);
+        tg.MainButton.onClick(async () => {
+            const name = document.getElementById('setup-name').value;
+            const start = document.getElementById('setup-start').value;
+            const end = document.getElementById('setup-end').value;
             
-            const dateStr = date.toISOString().split('T')[0]; // "2023-11-27"
-            const dayName = days[date.getDay()];
-            const dayNum = date.getDate();
-
-            const cell = document.createElement('div');
-            cell.className = 'cal-day';
-            cell.dataset.id = dateStr;
-            cell.innerHTML = `<span class="cal-day-name">${dayName}</span><span>${dayNum}</span>`;
-            
-            cell.onclick = () => {
-                if (selectedSlots.has(dateStr)) {
-                    selectedSlots.delete(dateStr);
-                    cell.classList.remove('selected');
-                } else {
-                    selectedSlots.add(dateStr);
-                    cell.classList.add('selected');
-                }
-            };
-            cal.appendChild(cell);
-        }
-    }
-
-    function initTimeGrid() {
-        document.getElementById('time-view').style.display = 'block';
-        document.getElementById('hint-text').innerText = "Drag to paint times";
-
-        const grid = document.getElementById('grid');
-        const dayLabels = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri'];
-        
-        // Header
-        const corner = document.createElement('div');
-        corner.className = 'header-cell';
-        grid.appendChild(corner);
-        dayLabels.forEach(d => {
-            const h = document.createElement('div');
-            h.className = 'header-cell';
-            h.innerText = d;
-            grid.appendChild(h);
-        });
-
-        // Rows
-        for (let h = 8; h < 22; h++) {
-            const timeCol = document.createElement('div');
-            timeCol.className = 'time-col';
-            timeCol.innerText = `${h}:00`;
-            grid.appendChild(timeCol);
-
-            for (let d = 0; d < dayLabels.length; d++) {
-                const slot = document.createElement('div');
-                slot.className = 'slot';
-                slot.dataset.id = `${d}-${h}`;
-                
-                // Drag Logic
-                slot.addEventListener('mousedown', startDrag);
-                slot.addEventListener('mouseenter', doDrag);
-                slot.addEventListener('touchstart', startTouch, {passive: false});
-                slot.addEventListener('touchmove', moveTouch, {passive: false});
-                
-                grid.appendChild(slot);
+            if (!name) {
+                tg.showAlert("Please enter an event name!");
+                return;
             }
+
+            const data = {
+                name: name,
+                mode: setupModeVal,
+                start_date: start || null,
+                end_date: end || null,
+                chat_id: chatId
+            };
+
+            document.getElementById('loader').style.display = 'flex';
+            tg.MainButton.hide();
+            
+            try {
+                const res = await fetch(`${BACKEND_API_URL}/create_event`, {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify(data)
+                });
+                const result = await res.json();
+
+                if (result.status === 'success') {
+                    tg.close();
+                } else {
+                    tg.showAlert("Error creating event: " + (result.message || "Unknown error"));
+                    document.getElementById('loader').style.display = 'none';
+                    tg.MainButton.show();
+                }
+            } catch (e) {
+                console.error(e);
+                tg.showAlert("Network Error. Please try again.");
+                document.getElementById('loader').style.display = 'none';
+                tg.MainButton.show();
+            }
+        });
+    }
+
+    function setSetupMode(m) {
+        setupModeVal = m;
+        document.getElementById('mode-time').classList.toggle('active', m === 'time');
+        document.getElementById('mode-date').classList.toggle('active', m === 'date');
+    }
+
+    // --- VOTING FUNCTIONS ---
+
+    async function loadData() {
+        if (!eventId) throw new Error("Missing Event ID");
+
+        // Timeout protection
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 10000); // 10 sec timeout
+
+        try {
+            const res = await fetch(`${BACKEND_API_URL}/get_event_data?eventId=${eventId}`, {
+                signal: controller.signal
+            });
+            clearTimeout(timeoutId);
+            if (!res.ok) throw new Error("HTTP " + res.status);
+            return await res.json();
+        } catch (e) {
+            clearTimeout(timeoutId);
+            throw e;
         }
     }
 
-    // --- DRAG LOGIC (Time Mode Only) ---
-    document.addEventListener('mouseup', () => isDragging = false);
-    document.addEventListener('touchend', () => isDragging = false);
+    function initVoting() {
+        loadData().then(data => {
+            if (data && !data.error) {
+                eventName = data.name;
+                mode = data.mode;
+                document.getElementById('event-title').innerText = eventName;
 
-    function startDrag(e) {
-        isDragging = true;
-        paintMode = !e.target.classList.contains('selected');
-        toggleSlot(e.target);
+                if (data.start_date) {
+                    const start = new Date(data.start_date);
+                    currentMonthDate = new Date(start);
+                    currentWeekStart = new Date(start);
+                    const d = currentWeekStart.getDay();
+                    const delta = currentWeekStart.getDate() - d + (d === 0 ? -6 : 1);
+                    currentWeekStart.setDate(delta);
+                }
+
+                const votes = data.votes || {};
+                globalSlotCounts = {};
+                let totalVoters = 0;
+                const voters = new Set();
+
+                Object.keys(votes).forEach(uid => {
+                    voters.add(uid);
+                    votes[uid].forEach(slot => {
+                        globalSlotCounts[slot] = (globalSlotCounts[slot] || 0) + 1;
+                    });
+                    if (uid === userId) {
+                        votes[uid].forEach(s => selectedSlots.add(s));
+                    }
+                });
+                globalTotalVoters = voters.size;
+
+                initViews();
+
+                tg.MainButton.setText("SUBMIT");
+                tg.MainButton.show();
+                tg.MainButton.onClick(submitVote);
+            } else {
+                showError("Event data invalid or not found.");
+            }
+        }).catch(err => {
+            console.error(err);
+            showError("Failed to load event. " + err.message);
+        });
     }
-    function doDrag(e) { if (isDragging) toggleSlot(e.target); }
     
-    function startTouch(e) {
-        if(e.cancelable) e.preventDefault();
-        isDragging = true;
-        const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (el?.classList.contains('slot')) {
-            paintMode = !el.classList.contains('selected');
-            toggleSlot(el);
-        }
-    }
-    function moveTouch(e) {
-        if(e.cancelable) e.preventDefault();
-        if (!isDragging) return;
-        const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY);
-        if (el?.classList.contains('slot')) toggleSlot(el);
+    function showError(msg) {
+        document.getElementById('loader').style.display = 'none';
+        document.getElementById('event-title').innerText = "Error";
+        document.getElementById('hint-text').style.display = 'none';
+        document.getElementById('error-msg').style.display = 'block';
+        document.getElementById('error-text').innerText = msg;
     }
 
-    function toggleSlot(el) {
-        const id = el.dataset.id;
-        if (paintMode) {
-            el.classList.add('selected');
-            selectedSlots.add(id);
+    function initViews() {
+        if (mode === 'date') {
+            initCalendar();
         } else {
-            el.classList.remove('selected');
-            selectedSlots.delete(id);
+            initTimeGrid();
         }
     }
 
-    // --- SUBMIT ---
-    tg.MainButton.setText("SUBMIT");
-    tg.MainButton.show();
-
-    tg.MainButton.onClick(async () => {
+    async function submitVote() {
         if (selectedSlots.size === 0) {
-            tg.showAlert("Please select at least one time!");
+            tg.showAlert("Please select at least one option!");
             return;
         }
-
         const payload = {
             eventId: eventId,
-            userId: tg.initDataUnsafe.user?.id || 'anon',
+            userId: userId,
             slots: Array.from(selectedSlots)
         };
-
         document.getElementById('loader').style.display = 'flex';
-        
         try {
             await fetch(`${BACKEND_API_URL}/submit_availability`, {
                 method: 'POST',
@@ -258,7 +397,108 @@
             document.getElementById('loader').style.display = 'none';
             tg.showAlert("Error saving. Check connection.");
         }
-    });
+    }
+
+    // --- CALENDAR LOGIC ---
+    function initCalendar() {
+        document.getElementById('date-view').style.display = 'block';
+        document.getElementById('hint-text').innerText = "Drag across dates to select";
+        renderMonth();
+        document.getElementById('prev-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() - 1); renderMonth(); };
+        document.getElementById('next-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() + 1); renderMonth(); };
+    }
+
+    function renderMonth() {
+        const year = currentMonthDate.getFullYear();
+        const month = currentMonthDate.getMonth();
+        const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
+        document.getElementById('month-label').innerText = `${monthNames[month]} ${year}`;
+        const calGrid = document.getElementById('calendar');
+        const oldDays = calGrid.querySelectorAll('.cal-day, .empty');
+        oldDays.forEach(el => el.remove());
+        const firstDay = new Date(year, month, 1);
+        const startingDayOfWeek = firstDay.getDay();
+        const daysInMonth = new Date(year, month + 1, 0).getDate();
+        for (let i = 0; i < startingDayOfWeek; i++) {
+            const empty = document.createElement('div'); empty.className = 'cal-day empty'; calGrid.appendChild(empty);
+        }
+        for (let d = 1; d <= daysInMonth; d++) {
+            const dateObj = new Date(year, month, d);
+            const dateStr = dateObj.toISOString().split('T')[0];
+            const cell = document.createElement('div');
+            cell.className = 'cal-day'; cell.dataset.id = dateStr; cell.innerHTML = `<span>${d}</span>`;
+            applyHeatmap(cell, dateStr, globalSlotCounts, globalTotalVoters);
+            if (selectedSlots.has(dateStr)) cell.classList.add('selected');
+            attachDragEvents(cell);
+            calGrid.appendChild(cell);
+        }
+    }
+
+    // --- TIME GRID LOGIC ---
+    function initTimeGrid() {
+        document.getElementById('time-view').style.display = 'block';
+        document.getElementById('hint-text').innerText = "Drag to paint times";
+        renderTimeGrid();
+        document.getElementById('prev-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() - 7); renderTimeGrid(); };
+        document.getElementById('next-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() + 7); renderTimeGrid(); };
+    }
+
+    function renderTimeGrid() {
+        const grid = document.getElementById('grid'); grid.innerHTML = '';
+        const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
+        const dates = [];
+        const corner = document.createElement('div'); corner.className = 'header-cell'; grid.appendChild(corner);
+        for (let i = 0; i < 7; i++) {
+            const d = new Date(currentWeekStart); d.setDate(currentWeekStart.getDate() + i); dates.push(d);
+            const h = document.createElement('div'); h.className = 'header-cell';
+            const dateStr = `${d.getDate()}/${d.getMonth()+1}`;
+            h.innerHTML = `<span>${days[i]}</span><span class="header-date">${dateStr}</span>`;
+            grid.appendChild(h);
+        }
+        const endWeek = new Date(dates[6]);
+        const startStr = `${dates[0].getDate()} ${dates[0].toLocaleString('default', {month:'short'})}`;
+        const endStr = `${endWeek.getDate()} ${endWeek.toLocaleString('default', {month:'short'})}`;
+        document.getElementById('week-label').innerText = `${startStr} - ${endStr}`;
+        for (let h = 8; h < 22; h++) {
+            const timeCol = document.createElement('div'); timeCol.className = 'time-col'; timeCol.innerText = `${h}:00`; grid.appendChild(timeCol);
+            for (let i = 0; i < 7; i++) {
+                const dateStr = dates[i].toISOString().split('T')[0];
+                const slotId = `${dateStr}-${h}`;
+                const slot = document.createElement('div'); slot.className = 'slot'; slot.dataset.id = slotId;
+                applyHeatmap(slot, slotId, globalSlotCounts, globalTotalVoters);
+                if (selectedSlots.has(slotId)) slot.classList.add('selected');
+                attachDragEvents(slot);
+                grid.appendChild(slot);
+            }
+        }
+    }
+
+    function applyHeatmap(el, id, slotCounts, totalVoters) {
+        if (!totalVoters) return;
+        const count = slotCounts[id] || 0;
+        if (count > 0) {
+            const saturation = count / totalVoters;
+            el.style.backgroundColor = `rgba(76, 175, 80, ${saturation})`;
+        }
+    }
+
+    // --- DRAG LOGIC (Shared) ---
+    function attachDragEvents(el) {
+        el.addEventListener('mousedown', startDrag); el.addEventListener('mouseenter', doDrag);
+        el.addEventListener('touchstart', startTouch, {passive: false}); el.addEventListener('touchmove', moveTouch, {passive: false});
+    }
+    document.addEventListener('mouseup', () => isDragging = false);
+    document.addEventListener('touchend', () => isDragging = false);
+    function startDrag(e) { if(e.cancelable) e.preventDefault(); isDragging = true; const cell = e.currentTarget; paintMode = !cell.classList.contains('selected'); toggleSlot(cell); }
+    function doDrag(e) { if (isDragging) toggleSlot(e.currentTarget); }
+    function startTouch(e) { if(e.cancelable) e.preventDefault(); isDragging = true; const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY); const cell = el?.closest('.cal-day, .slot'); if (cell) { paintMode = !cell.classList.contains('selected'); toggleSlot(cell); } }
+    function moveTouch(e) { if(e.cancelable) e.preventDefault(); if (!isDragging) return; const el = document.elementFromPoint(e.touches[0].clientX, e.touches[0].clientY); const cell = el?.closest('.cal-day, .slot'); if (cell) toggleSlot(cell); }
+    function toggleSlot(el) {
+        if (!el || el.classList.contains('empty')) return;
+        const id = el.dataset.id;
+        if (paintMode) { if (!selectedSlots.has(id)) { el.classList.add('selected'); selectedSlots.add(id); } }
+        else { if (selectedSlots.has(id)) { el.classList.remove('selected'); selectedSlots.delete(id); } }
+    }
 </script>
 </body>
 </html>
