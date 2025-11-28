@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import seaborn as sns
+import pandas as pd
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, Chat, InputFile
 from telegram.error import BadRequest
 from telegram.ext import Application, CommandHandler, ContextTypes, MessageHandler, filters, CallbackQueryHandler
@@ -57,12 +58,10 @@ def generate_heatmap_image(event_data):
     slot_scores = {}
 
     for user_votes in votes.values():
-        # Handle new format (dict) and legacy format (list)
         if isinstance(user_votes, list):
              for slot in user_votes:
                  slot_scores[slot] = slot_scores.get(slot, 0) + 1.0
         elif isinstance(user_votes, dict):
-            # If it's the wrapper dict {slots: ..., username: ...}
             if "slots" in user_votes:
                 user_votes = user_votes["slots"]
 
@@ -77,28 +76,27 @@ def generate_heatmap_image(event_data):
     if not slot_scores:
         return None
 
-    # Prepare data for plotting
     sorted_slots = sorted(slot_scores.keys())
 
+    # Visual Polish
     plt.figure(figsize=(10, 6))
-
-    # Logic differs slightly for Time Grid vs Date Grid
+    sns.set_theme(style="whitegrid") # Cleaner style
 
     if mode == "date":
-        # Sort by date
         try:
             dates = sorted(slot_scores.keys())
             scores = [slot_scores[d] for d in dates]
 
-            sns.barplot(x=dates, y=scores, palette="viridis")
-            plt.xticks(rotation=45)
-            plt.title(f"Availability for {event_data.get('name')}")
-            plt.ylabel("Score (Yes=1, Maybe=0.5)")
+            ax = sns.barplot(x=dates, y=scores, palette="Greens")
+            plt.xticks(rotation=45, fontsize=10)
+            plt.yticks(fontsize=10)
+            plt.title(f"Availability: {event_data.get('name')}", fontsize=14)
+            plt.ylabel("Score", fontsize=12)
+            plt.xlabel("Date", fontsize=12)
+            plt.tight_layout()
         except:
             return None
     else:
-        # Time Grid: Try to parse Day/Time
-        # Format: "YYYY-MM-DD-H"
         try:
             data_points = []
             for slot, score in slot_scores.items():
@@ -111,20 +109,24 @@ def generate_heatmap_image(event_data):
             if not data_points:
                 return None
 
-            import pandas as pd
             df = pd.DataFrame(data_points)
             pivot_table = df.pivot(index="Hour", columns="Date", values="Score")
 
-            sns.heatmap(pivot_table, cmap="YlGnBu", annot=True, fmt=".1f")
-            plt.title(f"Availability Heatmap: {event_data.get('name')}")
-            plt.xlabel("Date")
-            plt.ylabel("Hour")
+            # Use 'Greens' colormap for intuitive "Good" -> Green
+            ax = sns.heatmap(pivot_table, cmap="Greens", annot=True, fmt=".1f",
+                             cbar_kws={'label': 'Score'}, annot_kws={"size": 10})
+
+            plt.title(f"Availability: {event_data.get('name')}", fontsize=14)
+            plt.xlabel("Date", fontsize=12)
+            plt.ylabel("Hour", fontsize=12)
+            plt.xticks(fontsize=10)
+            plt.yticks(fontsize=10)
+            plt.tight_layout()
         except Exception as e:
             logger.error(f"Heatmap generation error: {e}")
-            # Fallback to simple bar
             keys = list(slot_scores.keys())
             vals = list(slot_scores.values())
-            sns.barplot(x=keys, y=vals)
+            sns.barplot(x=keys, y=vals, palette="Greens")
 
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight')
@@ -150,7 +152,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             web_app = WebAppInfo(url=setup_url)
             keyboard = [[InlineKeyboardButton("➕ Create Event", web_app=web_app)]]
 
-            # Send (Attempt WebApp, Fallback to DeepLink not needed here usually as it is private)
             await update.message.reply_text(
                 "📅 **Schedule New Event**\n\nTap below to set up your event details.",
                 reply_markup=InlineKeyboardMarkup(keyboard),
@@ -172,17 +173,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             return
 
     # Standard Menu
-
-    # TRY Web App Button first
     setup_url = f"{WEB_APP_URL}?mode=setup&chatId={chat.id}"
     web_app = WebAppInfo(url=setup_url)
-    
+
     keyboard_webapp = [
         [InlineKeyboardButton("➕ Create Event", web_app=web_app)],
         [InlineKeyboardButton("📅 Active Events", callback_data="list_active_events")],
         [InlineKeyboardButton("❓ Help", callback_data="show_help")]
     ]
-
+    
     try:
         await update.message.reply_text(
             "👋 **When2Meet Bot**\n\nMain Menu:",
@@ -191,7 +190,6 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except BadRequest as e:
         if "Button_type_invalid" in str(e):
-            # Fallback: Deep Link (for Group Chats where Web App might fail)
             bot_username = context.bot.username or (await context.bot.get_me()).username
             deep_link = f"https://t.me/{bot_username}?start=setup_{chat.id}"
 
@@ -209,17 +207,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             raise e
 
 async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles /schedule. Parses mentions and starts setup.
-    """
     args = context.args
     mentions = [w for w in args if w.startswith("@")]
     
-    # Generate temporary setup session
     import time, random
     setup_id = f"{update.effective_chat.id}_{int(time.time())}_{random.randint(100,999)}"
 
-    # Store pending participants if any
     if mentions:
         events_db[f"setup_{setup_id}"] = mentions
         save_data(events_db)
@@ -229,7 +222,6 @@ async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     chat = update.effective_chat
     
-    # Try Web App
     setup_url = f"{WEB_APP_URL}?mode=setup&chatId={chat.id}&setupId={setup_id}"
     web_app = WebAppInfo(url=setup_url)
     keyboard_webapp = [[InlineKeyboardButton("⚙️ Configure Event", web_app=web_app)]]
@@ -242,7 +234,6 @@ async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     except BadRequest as e:
         if "Button_type_invalid" in str(e):
-            # Fallback
             bot_username = context.bot.username or (await context.bot.get_me()).username
             deep_link = f"https://t.me/{bot_username}?start=setup_{chat.id}"
             keyboard_fallback = [[InlineKeyboardButton("⚙️ Configure Event", url=deep_link)]]
@@ -294,7 +285,6 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    # Don't answer yet, might take time to generate image
 
     try:
         event_id = query.data.replace("view_", "")
@@ -306,32 +296,44 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Event not found", show_alert=True)
         return
 
-    # Generate Image
     img_buf = generate_heatmap_image(event)
-
     votes = event.get("votes", {})
     total_users = len(votes)
     
-    msg = f"📊 **{event['name']}** ({total_users} voted)\n"
+    # Calculate Best Slots for Summary
+    slot_scores = {}
+    for user_votes in votes.values():
+         if isinstance(user_votes, dict) and "slots" in user_votes: user_votes = user_votes["slots"]
+         if isinstance(user_votes, list):
+             for s in user_votes: slot_scores[s] = slot_scores.get(s, 0) + 1.0
+         elif isinstance(user_votes, dict):
+             for s, t in user_votes.items(): slot_scores[s] = slot_scores.get(s, 0) + (1.0 if t=='yes' else 0.5)
 
-    # Check missing participants
+    sorted_slots = sorted(slot_scores.items(), key=lambda x: x[1], reverse=True)
+
+    msg = f"📊 **{event['name']}**\n"
+    msg += f"👥 {total_users} voted\n\n"
+    msg += "🏆 **Top 3 Candidates:**\n"
+
+    if not sorted_slots:
+        msg += "Waiting for votes..."
+    else:
+        for i, (slot, score) in enumerate(sorted_slots[:3]):
+            rank = ["🥇", "🥈", "🥉"][i]
+            # Format slot text
+            if event.get("mode") == "time":
+                # "2023-01-01-10" -> "Mon 01/01 10:00" (Approximate, requires date parsing)
+                parts = slot.split("-")
+                if len(parts) >= 2:
+                    h = parts[-1]
+                    d = "-".join(parts[:-1])
+                    msg += f"{rank} **{d} {h}:00** (Score: {score})\n"
+                else:
+                    msg += f"{rank} **{slot}** (Score: {score})\n"
+            else:
+                 msg += f"{rank} **{slot}** (Score: {score})\n"
+
     req_participants = event.get("required_participants", [])
-
-    keyboard = []
-
-    # Add Availability Button logic
-    # Try using Web App button first, but since this is View Results (callback),
-    # we can't easily catch exception and retry the Edit Message (or Reply).
-    # However, standard practice: send Deep Link if not sure?
-    # Actually, we can check chat type.
-    # But user wants to AVOID redirection if possible.
-
-    # Let's try Web App button. If it fails, we need to know.
-    # But we can't 'edit' the message easily if we are sending a NEW photo.
-    # Reply Photo creates a new message.
-
-    # Logic: Construct BOTH Keyboards? No.
-    # We will use the TRY/EXCEPT block inside the send_photo logic.
 
     safe_event_id = urllib.parse.quote(str(event_id))
     full_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={event.get('mode', 'time')}"
@@ -339,7 +341,6 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     btn_webapp = InlineKeyboardButton("👉 Add Availability", web_app=web_app_vote)
 
-    # Prepare fallback button (Deep Link)
     bot_username = context.bot.username or (await context.bot.get_me()).username
     deep_link = f"https://t.me/{bot_username}?start=vote_{event_id}"
     btn_fallback = InlineKeyboardButton("👉 Add Availability", url=deep_link)
@@ -348,13 +349,12 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if req_participants:
         extra_buttons.append(InlineKeyboardButton("🔔 Nudge Missing", callback_data=f"nudge_{event_id}"))
 
-    # Try sending with WebApp Button
     keyboard_webapp = [[btn_webapp]]
     if extra_buttons: keyboard_webapp.append(extra_buttons)
-    
+
     keyboard_fallback = [[btn_fallback]]
     if extra_buttons: keyboard_fallback.append(extra_buttons)
-    
+
     try:
         if img_buf:
             await query.message.reply_photo(
@@ -366,11 +366,9 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         else:
             await query.message.reply_text(msg + "\n(No data to visualize)", reply_markup=InlineKeyboardMarkup(keyboard_webapp), parse_mode="Markdown")
     except BadRequest as e:
-        # Re-seek buffer if needed (for photo)
         if img_buf: img_buf.seek(0)
 
         if "Button_type_invalid" in str(e):
-            # Fallback
             if img_buf:
                 await query.message.reply_photo(
                     photo=img_buf,
@@ -388,11 +386,11 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def nudge_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await query.answer()
-
+    
     event_id = query.data.replace("nudge_", "")
     event = events_db.get(event_id)
     if not event: return
-
+    
     req = set(event.get("required_participants", []))
     if not req:
         await query.message.reply_text("No specific participants required.")
@@ -475,11 +473,34 @@ async def submit_availability(request: Request):
     
     if event_id not in events_db: return {"status": "error", "message": "Event not found"}
     
-    events_db[event_id]["votes"][user_id] = {
+    event = events_db[event_id]
+    event["votes"][user_id] = {
         "slots": slots,
         "username": username
     }
     save_data(events_db)
+
+    # Notify Group
+    try:
+        if hasattr(app.state, "bot_app"):
+            bot = app.state.bot_app.bot
+            chat_id = event.get("chat_id")
+            event_name = event.get("name", "Event")
+            display_name = f"@{username}" if username else f"User {user_id[-4:]}"
+
+            # Add a button to View Results immediately
+            btn = InlineKeyboardButton("📊 View Updated Results", callback_data=f"view_{event_id}")
+            kb = InlineKeyboardMarkup([[btn]])
+
+            await bot.send_message(
+                chat_id=chat_id,
+                text=f"✅ **{display_name}** updated their availability for **{event_name}**.",
+                reply_markup=kb,
+                parse_mode="Markdown"
+            )
+    except Exception as e:
+        logger.error(f"Failed to notify group: {e}")
+
     return {"status": "success"}
 
 @app.post("/create_event")
@@ -522,14 +543,12 @@ async def create_event(request: Request):
     if hasattr(app.state, "bot_app"):
         bot = app.state.bot_app.bot
 
-        # Determine deep link vs web app button
         safe_event_id = urllib.parse.quote(str(event_id))
         full_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={mode}"
         web_app_vote = WebAppInfo(url=full_url)
 
         view_btn = InlineKeyboardButton("📊 View Results", callback_data=f"view_{event_id}")
 
-        # Try WebApp first
         btn_webapp = InlineKeyboardButton("👉 Add Availability", web_app=web_app_vote)
         keyboard_webapp = [[btn_webapp], [view_btn]]
 
@@ -549,7 +568,6 @@ async def create_event(request: Request):
             )
         except BadRequest as e:
             if "Button_type_invalid" in str(e):
-                # Fallback to Deep Link
                 bot_username = bot.username or (await bot.get_me()).username
                 deep_link = f"https://t.me/{bot_username}?start=vote_{event_id}"
                 btn_fallback = InlineKeyboardButton("👉 Add Availability", url=deep_link)
