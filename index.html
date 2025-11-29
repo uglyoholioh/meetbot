@@ -52,6 +52,19 @@
         }
         .nav-title { font-weight: bold; font-size: 15px; }
 
+        /* --- ACTIONS TOOLBAR --- */
+        .actions-toolbar {
+            display: flex; justify-content: center; gap: 10px;
+            padding: 10px; background-color: var(--secondary-bg);
+            border-bottom: 1px solid #ddd;
+        }
+        .action-btn {
+            padding: 8px 12px; border: 1px solid var(--button-color);
+            background-color: var(--bg-color); color: var(--button-color);
+            border-radius: 6px; font-size: 13px; cursor: pointer;
+        }
+        .action-btn:active { background-color: var(--secondary-bg); }
+
         /* --- TIME GRID STYLES --- */
         .time-grid-wrapper { flex-grow: 1; overflow: auto; display: none; }
         .grid-container {
@@ -158,6 +171,13 @@
             <span class="nav-title" id="week-label">Week View</span>
             <button class="nav-btn" id="next-week">▶</button>
         </div>
+
+        <!-- TOOLBAR for Time View -->
+        <div class="actions-toolbar">
+            <button class="action-btn" onclick="selectAll('time')">✅ Mark Week Free</button>
+            <button class="action-btn" onclick="clearAll('time')">❌ Clear Week</button>
+        </div>
+
         <div id="grid" class="grid-container"></div>
     </div>
 
@@ -168,6 +188,13 @@
             <span class="nav-title" id="month-label">Month Year</span>
             <button class="nav-btn" id="next-month">▶</button>
         </div>
+
+        <!-- TOOLBAR for Calendar View -->
+        <div class="actions-toolbar">
+            <button class="action-btn" onclick="selectAll('date')">✅ Mark Month Free</button>
+            <button class="action-btn" onclick="clearAll('date')">❌ Clear Month</button>
+        </div>
+
         <div id="calendar" class="calendar-grid">
             <div class="cal-day-header">Sun</div><div class="cal-day-header">Mon</div>
             <div class="cal-day-header">Tue</div><div class="cal-day-header">Wed</div>
@@ -412,6 +439,34 @@
             document.getElementById('loader').style.display = 'none';
             tg.showAlert("Error saving. Check connection.");
         }
+    }
+
+    // --- BULK OPERATIONS ---
+    function selectAll(currentMode) {
+        // Find all visible slots/days
+        const selector = currentMode === 'time' ? '#grid .slot' : '#calendar .cal-day';
+        const elements = document.querySelectorAll(selector);
+
+        elements.forEach(el => {
+            if (!el.classList.contains('empty')) {
+                selectedSlots.set(el.dataset.id, 'yes');
+                updateSlotVisual(el, el.dataset.id);
+            }
+        });
+        tg.HapticFeedback.impactOccurred('light');
+    }
+
+    function clearAll(currentMode) {
+        const selector = currentMode === 'time' ? '#grid .slot' : '#calendar .cal-day';
+        const elements = document.querySelectorAll(selector);
+
+        elements.forEach(el => {
+            if (!el.classList.contains('empty')) {
+                selectedSlots.delete(el.dataset.id);
+                updateSlotVisual(el, el.dataset.id);
+            }
+        });
+        tg.HapticFeedback.impactOccurred('light');
     }
 
     // --- CALENDAR LOGIC ---

@@ -9,6 +9,7 @@ import io
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import seaborn as sns
 import pandas as pd
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo, Chat, InputFile
@@ -54,6 +55,11 @@ def generate_heatmap_image(event_data):
     if not votes:
         return None
 
+    # Calculate Total Users to determine Max Saturation
+    total_users = len(votes)
+    if total_users == 0:
+        return None
+
     # Aggregate scores
     slot_scores = {}
 
@@ -87,14 +93,23 @@ def generate_heatmap_image(event_data):
             dates = sorted(slot_scores.keys())
             scores = [slot_scores[d] for d in dates]
 
-            ax = sns.barplot(x=dates, y=scores, palette="Greens")
+            # Normalize scores relative to total_users for coloring
+            # Explicitly map score to color to ensure identical scores = identical colors
+            norm_scores = [s / total_users for s in scores]
+            colors = [cm.Greens(n) for n in norm_scores]
+
+            # Use hue=dates to avoid FutureWarning, legend=False to hide it
+            ax = sns.barplot(x=dates, y=scores, hue=dates, palette=colors, legend=False)
+
             plt.xticks(rotation=45, fontsize=10)
             plt.yticks(fontsize=10)
             plt.title(f"Availability: {event_data.get('name')}", fontsize=14)
             plt.ylabel("Score", fontsize=12)
             plt.xlabel("Date", fontsize=12)
+            plt.ylim(0, total_users + 0.5) # Set Y-limit to max possible users
             plt.tight_layout()
-        except:
+        except Exception as e:
+            logger.error(f"Barplot generation error: {e}")
             return None
     else:
         try:
@@ -112,9 +127,11 @@ def generate_heatmap_image(event_data):
             df = pd.DataFrame(data_points)
             pivot_table = df.pivot(index="Hour", columns="Date", values="Score")
 
-            # Use 'Greens' colormap for intuitive "Good" -> Green
+            # Use 'Greens' colormap with fixed vmin/vmax
+            # vmin=0, vmax=total_users ensures saturation is absolute % of turnout
             ax = sns.heatmap(pivot_table, cmap="Greens", annot=True, fmt=".1f",
-                             cbar_kws={'label': 'Score'}, annot_kws={"size": 10})
+                             cbar_kws={'label': 'Score'}, annot_kws={"size": 10},
+                             vmin=0, vmax=total_users)
 
             plt.title(f"Availability: {event_data.get('name')}", fontsize=14)
             plt.xlabel("Date", fontsize=12)
@@ -124,9 +141,7 @@ def generate_heatmap_image(event_data):
             plt.tight_layout()
         except Exception as e:
             logger.error(f"Heatmap generation error: {e}")
-            keys = list(slot_scores.keys())
-            vals = list(slot_scores.values())
-            sns.barplot(x=keys, y=vals, palette="Greens")
+            return None
 
     buf = io.BytesIO()
     plt.savefig(buf, format='png', bbox_inches='tight')
@@ -175,13 +190,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     # Standard Menu
     setup_url = f"{WEB_APP_URL}?mode=setup&chatId={chat.id}"
     web_app = WebAppInfo(url=setup_url)
-
+    
     keyboard_webapp = [
         [InlineKeyboardButton("➕ Create Event", web_app=web_app)],
         [InlineKeyboardButton("📅 Active Events", callback_data="list_active_events")],
         [InlineKeyboardButton("❓ Help", callback_data="show_help")]
     ]
-    
+
     try:
         await update.message.reply_text(
             "👋 **When2Meet Bot**\n\nMain Menu:",
@@ -300,38 +315,19 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
     votes = event.get("votes", {})
     total_users = len(votes)
     
-    # Calculate Best Slots for Summary
-    slot_scores = {}
-    for user_votes in votes.values():
-         if isinstance(user_votes, dict) and "slots" in user_votes: user_votes = user_votes["slots"]
-         if isinstance(user_votes, list):
-             for s in user_votes: slot_scores[s] = slot_scores.get(s, 0) + 1.0
-         elif isinstance(user_votes, dict):
-             for s, t in user_votes.items(): slot_scores[s] = slot_scores.get(s, 0) + (1.0 if t=='yes' else 0.5)
-
-    sorted_slots = sorted(slot_scores.items(), key=lambda x: x[1], reverse=True)
+    # Collect usernames
+    participants = []
+    for v_data in votes.values():
+        if isinstance(v_data, dict) and "username" in v_data:
+            participants.append(f"{v_data['username']}")
+        else:
+            participants.append("User")
 
     msg = f"📊 **{event['name']}**\n"
-    msg += f"👥 {total_users} voted\n\n"
-    msg += "🏆 **Top 3 Candidates:**\n"
+    msg += f"👥 {total_users} responded\n\n"
 
-    if not sorted_slots:
-        msg += "Waiting for votes..."
-    else:
-        for i, (slot, score) in enumerate(sorted_slots[:3]):
-            rank = ["🥇", "🥈", "🥉"][i]
-            # Format slot text
-            if event.get("mode") == "time":
-                # "2023-01-01-10" -> "Mon 01/01 10:00" (Approximate, requires date parsing)
-                parts = slot.split("-")
-                if len(parts) >= 2:
-                    h = parts[-1]
-                    d = "-".join(parts[:-1])
-                    msg += f"{rank} **{d} {h}:00** (Score: {score})\n"
-                else:
-                    msg += f"{rank} **{slot}** (Score: {score})\n"
-            else:
-                 msg += f"{rank} **{slot}** (Score: {score})\n"
+    if participants:
+        msg += "**Responded:** " + ", ".join(participants) + "\n"
 
     req_participants = event.get("required_participants", [])
 
@@ -480,26 +476,20 @@ async def submit_availability(request: Request):
     }
     save_data(events_db)
 
-    # Notify Group
+    # Notify User (Private Chat)
     try:
         if hasattr(app.state, "bot_app"):
             bot = app.state.bot_app.bot
-            chat_id = event.get("chat_id")
             event_name = event.get("name", "Event")
-            display_name = f"@{username}" if username else f"User {user_id[-4:]}"
 
-            # Add a button to View Results immediately
-            btn = InlineKeyboardButton("📊 View Updated Results", callback_data=f"view_{event_id}")
-            kb = InlineKeyboardMarkup([[btn]])
-
+            # Send to User ID directly (assuming user has started bot)
             await bot.send_message(
-                chat_id=chat_id,
-                text=f"✅ **{display_name}** updated their availability for **{event_name}**.",
-                reply_markup=kb,
+                chat_id=user_id,
+                text=f"✅ Your availability for **{event_name}** has been saved.",
                 parse_mode="Markdown"
             )
     except Exception as e:
-        logger.error(f"Failed to notify group: {e}")
+        logger.error(f"Failed to notify user {user_id}: {e}")
 
     return {"status": "success"}
 
@@ -543,6 +533,7 @@ async def create_event(request: Request):
     if hasattr(app.state, "bot_app"):
         bot = app.state.bot_app.bot
 
+        # Determine deep link vs web app button
         safe_event_id = urllib.parse.quote(str(event_id))
         full_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={mode}"
         web_app_vote = WebAppInfo(url=full_url)
