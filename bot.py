@@ -39,9 +39,13 @@ class Persistence:
         if os.path.exists(DATA_FILE):
             try:
                 with open(DATA_FILE, "r", encoding="utf-8") as f:
-                    return json.load(f)
+                    data = json.load(f)
+                    logger.info(f"Loaded {len(data)} events from {DATA_FILE}")
+                    return data
             except Exception as e:
                 logger.error(f"File Load Error: {e}")
+        else:
+            logger.info(f"{DATA_FILE} not found, starting empty.")
         return {}
 
     def upsert_event(self, event_id: str, data: dict):
@@ -65,6 +69,7 @@ class Persistence:
         try:
             with open(DATA_FILE, "w", encoding="utf-8") as f:
                 json.dump(events_db, f, indent=2)
+            logger.info(f"Saved database to {DATA_FILE}")
         except Exception as e:
             logger.error(f"File Save Error: {e}")
 
@@ -334,10 +339,37 @@ async def list_events_logic(message_obj, chat_id):
         return
 
     msg = "📅 **Active Events:**\n\n"
+
+    # UPDATED: Use WebApp buttons for "View Results" directly from the list
+    # Fallback logic not strictly needed here as list command works in private too,
+    # but we should be safe. However, inline keys in list view are often ephemeral.
+    # To keep it simple and robust (like view_results): use callback.
+    # The user REQUESTED: "when i view active events i want the view to be the calendar view"
+    # So the button must open the Web App.
+
     keyboard = []
     for eid, name in active_events[-5:]:
         msg += f"• {name}\n"
-        keyboard.append([InlineKeyboardButton(f"View {name}", callback_data=f"view_{eid}")])
+
+        safe_eid = urllib.parse.quote(str(eid))
+        url = f"{WEB_APP_URL}?eventId={safe_eid}&mode=result"
+        wa = WebAppInfo(url=url)
+
+        # We try to use Web App button.
+        # Note: If this is a group chat, this MIGHT fail with Button_type_invalid if we just send it.
+        # But we can't easily do try/except on individual buttons in a list.
+        # Strategy: Use a callback "open_result_{eid}"? No, user wants direct open.
+        # Strategy: Use Deep Link fallback if in Group?
+
+        if message_obj.chat.type != Chat.PRIVATE:
+             # In Group: Use Deep Link to avoid crashes
+             # We need bot username.
+             # Getting it async inside a loop is messy.
+             # We will use callback "view_{eid}" which handles the smart logic (WebApp vs Fallback).
+             keyboard.append([InlineKeyboardButton(f"View {name}", callback_data=f"view_{eid}")])
+        else:
+             # In Private: Direct Web App
+             keyboard.append([InlineKeyboardButton(f"View {name}", web_app=wa)])
 
     await message_obj.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
