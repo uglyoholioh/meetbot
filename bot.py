@@ -20,27 +20,104 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from contextlib import asynccontextmanager
+from supabase import create_client, Client
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "")
+SUPABASE_URL = os.getenv("SUPABASE_URL")
+SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DATA_FILE = "storage.json"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- PERSISTENCE ---
-def load_data():
-    if os.path.exists(DATA_FILE):
-        with open(DATA_FILE, "r") as f:
-            return json.load(f)
-    return {}
+# --- PERSISTENCE MANAGER ---
+class Persistence:
+    def __init__(self):
+        self.client: Client = None
+        self.use_db = False
 
-def save_data(data):
-    with open(DATA_FILE, "w") as f:
-        json.dump(data, f)
+        if SUPABASE_URL and SUPABASE_KEY:
+            try:
+                self.client = create_client(SUPABASE_URL, SUPABASE_KEY)
+                self.use_db = True
+                logger.info("Supabase configured.")
+            except Exception as e:
+                logger.error(f"Failed to init Supabase: {e}")
+                self.use_db = False
 
-events_db = load_data()
+    def load_all(self):
+        """Loads all events. Returns dict."""
+        if self.use_db:
+            try:
+                # Assuming table 'events' with columns: id (text), data (jsonb)
+                response = self.client.table("events").select("*").execute()
+                # Map list of rows to dict {id: data}
+                data_map = {}
+                for row in response.data:
+                    data_map[row['id']] = row['data']
+                return data_map
+            except Exception as e:
+                logger.error(f"DB Load Error: {e}. Falling back to empty.")
+                return {}
+        else:
+            if os.path.exists(DATA_FILE):
+                try:
+                    with open(DATA_FILE, "r", encoding="utf-8") as f:
+                        return json.load(f)
+                except Exception as e:
+                    logger.error(f"File Load Error: {e}")
+            return {}
+
+    def upsert_event(self, event_id: str, data: dict):
+        """Upserts a single event."""
+        # Update memory cache
+        events_db[event_id] = data
+
+        if self.use_db:
+            try:
+                self.client.table("events").upsert({"id": event_id, "data": data}).execute()
+            except Exception as e:
+                logger.error(f"DB Upsert Error: {e}")
+        else:
+            self._save_file()
+
+    def upsert_setup(self, setup_id: str, data: list):
+        """Upserts setup data (list)."""
+        events_db[setup_id] = data
+        if self.use_db:
+            try:
+                self.client.table("events").upsert({"id": setup_id, "data": data}).execute()
+            except Exception as e:
+                logger.error(f"DB Upsert Setup Error: {e}")
+        else:
+            self._save_file()
+
+    def delete_event(self, event_id: str):
+        """Deletes an event."""
+        if event_id in events_db:
+            del events_db[event_id]
+
+        if self.use_db:
+            try:
+                self.client.table("events").delete().eq("id", event_id).execute()
+            except Exception as e:
+                logger.error(f"DB Delete Error: {e}")
+        else:
+            self._save_file()
+
+    def _save_file(self):
+        """Helper for file persistence."""
+        try:
+            with open(DATA_FILE, "w", encoding="utf-8") as f:
+                json.dump(events_db, f)
+        except Exception as e:
+            logger.error(f"File Save Error: {e}")
+
+# Initialize Persistence
+db = Persistence()
+events_db = db.load_all()
 
 # --- HELPER FUNCTIONS ---
 
@@ -93,9 +170,12 @@ def generate_heatmap_image(event_data):
             dates = sorted(slot_scores.keys())
             scores = [slot_scores[d] for d in dates]
 
+            # Normalize scores relative to total_users for coloring
+            # Explicitly map score to color to ensure identical scores = identical colors
             norm_scores = [s / total_users for s in scores]
             colors = [cm.Greens(n) for n in norm_scores]
 
+            # Use hue=dates to avoid FutureWarning, legend=False to hide it
             ax = sns.barplot(x=dates, y=scores, hue=dates, palette=colors, legend=False)
 
             plt.xticks(rotation=45, fontsize=10)
@@ -103,7 +183,7 @@ def generate_heatmap_image(event_data):
             plt.title(f"Availability: {event_data.get('name')}", fontsize=14)
             plt.ylabel("Score", fontsize=12)
             plt.xlabel("Date", fontsize=12)
-            plt.ylim(0, total_users + 0.5)
+            plt.ylim(0, total_users + 0.5) # Set Y-limit to max possible users
             plt.tight_layout()
         except Exception as e:
             logger.error(f"Barplot generation error: {e}")
@@ -124,6 +204,8 @@ def generate_heatmap_image(event_data):
             df = pd.DataFrame(data_points)
             pivot_table = df.pivot(index="Hour", columns="Date", values="Score")
 
+            # Use 'Greens' colormap with fixed vmin/vmax
+            # vmin=0, vmax=total_users ensures saturation is absolute % of turnout
             ax = sns.heatmap(pivot_table, cmap="Greens", annot=True, fmt=".1f",
                              cbar_kws={'label': 'Score'}, annot_kws={"size": 10},
                              vmin=0, vmax=total_users)
@@ -245,10 +327,11 @@ async def ask_event_mode(update: Update, context: ContextTypes.DEFAULT_TYPE):
     
     import time, random
     setup_id = f"{update.effective_chat.id}_{int(time.time())}_{random.randint(100,999)}"
+    setup_key = f"setup_{setup_id}"
     
     if mentions:
-        events_db[f"setup_{setup_id}"] = mentions
-        save_data(events_db)
+        # PERSIST SETUP
+        db.upsert_setup(setup_key, mentions)
         msg_text = f"📅 **Schedule Event**\nParticipants: {', '.join(mentions)}\n\nClick below to configure:"
     else:
         msg_text = "📅 **Schedule Event**\n\nClick below to configure:"
@@ -299,30 +382,9 @@ async def list_events_logic(message_obj, chat_id):
 
     msg = "📅 **Active Events:**\n\n"
     keyboard = []
-    
-    # Pre-fetch bot username for deep links
-    # We can't easily get context here without passing it, but usually this runs in a callback
-    # For simplicity, we'll try to use WebApp buttons, if it fails, user can use /start
-    
     for eid, name in active_events[-5:]:
         msg += f"• {name}\n"
-        # We now want "View Results" to open Web App
-        safe_eid = urllib.parse.quote(str(eid))
-        url = f"{WEB_APP_URL}?eventId={safe_eid}&mode=result"
-        wa = WebAppInfo(url=url)
-        keyboard.append([InlineKeyboardButton(f"View {name}", web_app=wa)])
-        # Note: If this fails in a group, we might need fallback.
-        # But list_events is usually ephemeral.
-        # Ideally we use deep link fallback here too but structure is complex.
-        # Let's keep it simple or use callback fallback.
-        # Actually, let's stick to callback for list view to be safe, then redirect inside?
-        # Reverting to callback for list view for safety, user can click "View Results" which handles the logic.
-        # Wait, previous logic used callback=view_{eid}.
-        # Let's keep using callback=view_{eid} which then triggers view_results which handles the smart logic.
-
-    keyboard = []
-    for eid, name in active_events[-5:]:
-         keyboard.append([InlineKeyboardButton(f"View {name}", callback_data=f"view_{eid}")])
+        keyboard.append([InlineKeyboardButton(f"View {name}", callback_data=f"view_{eid}")])
 
     await message_obj.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -338,10 +400,6 @@ async def help_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """
-    Handles the "View Results" callback.
-    Now prioritizes sending a Web App button for interactive results.
-    """
     query = update.callback_query
 
     try:
@@ -354,9 +412,12 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.answer("Event not found", show_alert=True)
         return
 
-    # Calculate basic stats for the message
+    # Generate Image
+    img_buf = generate_heatmap_image(event)
     votes = event.get("votes", {})
     total_users = len(votes)
+
+    # Collect usernames
     participants = []
     for v_data in votes.values():
         if isinstance(v_data, dict) and "username" in v_data:
@@ -365,68 +426,67 @@ async def view_results(update: Update, context: ContextTypes.DEFAULT_TYPE):
             participants.append("User")
 
     msg = f"📊 **{event['name']}**\n"
-    msg += f"👥 {total_users} responded\n"
+    msg += f"👥 {total_users} responded\n\n"
+
     if participants:
         msg += "**Responded:** " + ", ".join(participants) + "\n"
-    
-    # Buttons
-    safe_event_id = urllib.parse.quote(str(event_id))
 
-    # 1. Interactive Results (Web App)
+    req_participants = event.get("required_participants", [])
+
+    safe_event_id = urllib.parse.quote(str(event_id))
+    full_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={event.get('mode', 'time')}"
+    web_app_vote = WebAppInfo(url=full_url)
+
+    # New: View Results as Web App
     result_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode=result"
     web_app_result = WebAppInfo(url=result_url)
-    btn_result = InlineKeyboardButton("📊 Open Interactive View", web_app=web_app_result)
 
-    # 2. Add Availability (Web App)
-    vote_url = f"{WEB_APP_URL}?eventId={safe_event_id}&mode={event.get('mode', 'time')}"
-    web_app_vote = WebAppInfo(url=vote_url)
-    btn_vote = InlineKeyboardButton("👉 Add Availability", web_app=web_app_vote)
+    btn_webapp = InlineKeyboardButton("👉 Add Availability", web_app=web_app_vote)
+    btn_result = InlineKeyboardButton("📊 View Results", web_app=web_app_result)
 
-    # Fallbacks (Deep Links)
+    keyboard_webapp = [[btn_webapp], [btn_result]]
+
+    # Fallback
     bot_username = context.bot.username or (await context.bot.get_me()).username
-    link_result = f"https://t.me/{bot_username}?start=result_{event_id}"
     link_vote = f"https://t.me/{bot_username}?start=vote_{event_id}"
+    link_result = f"https://t.me/{bot_username}?start=result_{event_id}"
 
-    btn_result_fallback = InlineKeyboardButton("📊 Open Interactive View", url=link_result)
-    btn_vote_fallback = InlineKeyboardButton("👉 Add Availability", url=link_vote)
+    btn_vote_fb = InlineKeyboardButton("👉 Add Availability", url=link_vote)
+    btn_result_fb = InlineKeyboardButton("📊 View Results", url=link_result)
+    keyboard_fallback = [[btn_vote_fb], [btn_result_fb]]
 
-    # Nudge
-    req_participants = event.get("required_participants", [])
     extra_buttons = []
     if req_participants:
         extra_buttons.append(InlineKeyboardButton("🔔 Nudge Missing", callback_data=f"nudge_{event_id}"))
 
-    # Try WebApp First
-    keyboard_webapp = [[btn_result], [btn_vote]]
     if extra_buttons: keyboard_webapp.append(extra_buttons)
-    
-    keyboard_fallback = [[btn_result_fallback], [btn_vote_fallback]]
     if extra_buttons: keyboard_fallback.append(extra_buttons)
-    
+
     try:
-        # Edit if possible (since this is a callback from a previous message)
-        # But editing into a WebApp button is tricky if the original message was text.
-        # Safest is to edit the text/markup.
-        await query.message.edit_text(
-            text=msg,
-            reply_markup=InlineKeyboardMarkup(keyboard_webapp),
-            parse_mode="Markdown"
-        )
+        if img_buf:
+            await query.message.reply_photo(
+                photo=img_buf,
+                caption=msg,
+                reply_markup=InlineKeyboardMarkup(keyboard_webapp),
+                parse_mode="Markdown"
+            )
+        else:
+            await query.message.reply_text(msg + "\n(No data to visualize)", reply_markup=InlineKeyboardMarkup(keyboard_webapp), parse_mode="Markdown")
     except BadRequest as e:
-        if "Button_type_invalid" in str(e) or "Message is not modified" in str(e):
-            # Try fallback
-            try:
-                await query.message.edit_text(
-                    text=msg,
+        if img_buf: img_buf.seek(0)
+
+        if "Button_type_invalid" in str(e):
+            if img_buf:
+                await query.message.reply_photo(
+                    photo=img_buf,
+                    caption=msg,
                     reply_markup=InlineKeyboardMarkup(keyboard_fallback),
                     parse_mode="Markdown"
                 )
-            except Exception:
-                # If edit fails (e.g. message too old or same content), send new
-                await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard_fallback), parse_mode="Markdown")
+            else:
+                await query.message.reply_text(msg + "\n(No data to visualize)", reply_markup=InlineKeyboardMarkup(keyboard_fallback), parse_mode="Markdown")
         else:
-            logger.error(f"Error viewing results: {e}")
-            await query.message.reply_text(msg, reply_markup=InlineKeyboardMarkup(keyboard_fallback), parse_mode="Markdown")
+            logger.error(f"Error sending results: {e}")
 
     await query.answer()
 
@@ -519,13 +579,14 @@ async def submit_availability(request: Request):
     slots = data.get("slots")
     
     if event_id not in events_db: return {"status": "error", "message": "Event not found"}
-    
+
     event = events_db[event_id]
     event["votes"][user_id] = {
         "slots": slots,
         "username": username
     }
-    save_data(events_db)
+    # PERSIST VOTE
+    db.upsert_event(event_id, event)
 
     # Notify User (Private Chat)
     try:
@@ -563,12 +624,13 @@ async def create_event(request: Request):
         key = f"setup_{setup_id}"
         if key in events_db:
             required_participants = events_db[key]
-            del events_db[key] # Cleanup
+            # CLEANUP SETUP
+            db.delete_event(key)
 
     import time, random
     event_id = f"{chat_id}_{int(time.time())}_{random.randint(100,999)}"
 
-    events_db[event_id] = {
+    new_event = {
         "name": event_name,
         "mode": mode,
         "start_date": start_date,
@@ -577,7 +639,9 @@ async def create_event(request: Request):
         "required_participants": required_participants,
         "votes": {}
     }
-    save_data(events_db)
+
+    # PERSIST NEW EVENT
+    db.upsert_event(event_id, new_event)
 
     # Send Message
     if hasattr(app.state, "bot_app"):
