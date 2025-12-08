@@ -173,7 +173,7 @@
         </div>
 
         <!-- TOOLBAR for Time View -->
-        <div class="actions-toolbar">
+        <div class="actions-toolbar" id="toolbar-time">
             <button class="action-btn" onclick="selectAll('time')">✅ Mark Week Free</button>
             <button class="action-btn" onclick="clearAll('time')">❌ Clear Week</button>
         </div>
@@ -190,7 +190,7 @@
         </div>
 
         <!-- TOOLBAR for Calendar View -->
-        <div class="actions-toolbar">
+        <div class="actions-toolbar" id="toolbar-date">
             <button class="action-btn" onclick="selectAll('date')">✅ Mark Month Free</button>
             <button class="action-btn" onclick="clearAll('date')">❌ Clear Month</button>
         </div>
@@ -255,6 +255,8 @@
     // Route logic
     if (modeParam === 'setup') {
         initSetup();
+    } else if (modeParam === 'result') {
+        initResultMode();
     } else {
         initVoting();
     }
@@ -342,52 +344,8 @@
     function initVoting() {
         loadData().then(data => {
             if (data && !data.error) {
-                eventName = data.name;
-                mode = data.mode;
-                document.getElementById('event-title').innerText = eventName;
-
-                if (data.start_date) {
-                    const start = new Date(data.start_date);
-                    currentMonthDate = new Date(start);
-                    currentWeekStart = new Date(start);
-                    const d = currentWeekStart.getDay();
-                    const delta = currentWeekStart.getDate() - d + (d === 0 ? -6 : 1);
-                    currentWeekStart.setDate(delta);
-                }
-
-                const votes = data.votes || {};
-                globalSlotScores = {};
-                let totalVoters = 0;
-                const voters = new Set();
-
-                // Parse Votes (handle Legacy List and New Dict)
-                Object.keys(votes).forEach(uid => {
-                    voters.add(uid);
-                    let userSlots = votes[uid];
-                    // Handle wrapped object if needed (for username)
-                    if (userSlots.slots) {
-                        userSlots = userSlots.slots;
-                    }
-
-                    if (Array.isArray(userSlots)) {
-                        // Legacy: List of strings (assumed 'yes')
-                        userSlots.forEach(slot => {
-                            globalSlotScores[slot] = (globalSlotScores[slot] || 0) + 1.0;
-                            if (uid === userId) selectedSlots.set(slot, 'yes');
-                        });
-                    } else if (typeof userSlots === 'object') {
-                        // New: Dict {slotId: type}
-                        Object.entries(userSlots).forEach(([slot, type]) => {
-                            let weight = (type === 'yes') ? 1.0 : 0.5;
-                            globalSlotScores[slot] = (globalSlotScores[slot] || 0) + weight;
-                            if (uid === userId) selectedSlots.set(slot, type);
-                        });
-                    }
-                });
-                globalTotalVoters = voters.size;
-
-                initViews();
-
+                processEventData(data);
+                initViews(true); // true = interactive
                 tg.MainButton.setText("SUBMIT");
                 tg.MainButton.show();
                 tg.MainButton.onClick(submitVote);
@@ -400,6 +358,69 @@
         });
     }
     
+    function initResultMode() {
+        loadData().then(data => {
+            if (data && !data.error) {
+                processEventData(data);
+                document.getElementById('hint-text').innerText = "View Results (Read Only)";
+
+                // Hide interactive toolbars
+                document.getElementById('toolbar-time').style.display = 'none';
+                document.getElementById('toolbar-date').style.display = 'none';
+
+                initViews(false); // false = read-only
+
+                tg.MainButton.setText("SHARE RESULTS");
+                tg.MainButton.show();
+                tg.MainButton.onClick(shareResults);
+            } else {
+                showError("Event data invalid or not found.");
+            }
+        }).catch(err => {
+            showError("Failed to load results.");
+        });
+    }
+
+    function processEventData(data) {
+        eventName = data.name;
+        mode = data.mode;
+        document.getElementById('event-title').innerText = eventName;
+
+        if (data.start_date) {
+            const start = new Date(data.start_date);
+            currentMonthDate = new Date(start);
+            currentWeekStart = new Date(start);
+            const d = currentWeekStart.getDay();
+            const delta = currentWeekStart.getDate() - d + (d === 0 ? -6 : 1);
+            currentWeekStart.setDate(delta);
+        }
+
+        const votes = data.votes || {};
+        globalSlotScores = {};
+        let totalVoters = 0;
+        const voters = new Set();
+
+        Object.keys(votes).forEach(uid => {
+            voters.add(uid);
+            let userSlots = votes[uid];
+            if (userSlots.slots) userSlots = userSlots.slots;
+
+            if (Array.isArray(userSlots)) {
+                userSlots.forEach(slot => {
+                    globalSlotScores[slot] = (globalSlotScores[slot] || 0) + 1.0;
+                    if (uid === userId) selectedSlots.set(slot, 'yes');
+                });
+            } else if (typeof userSlots === 'object') {
+                Object.entries(userSlots).forEach(([slot, type]) => {
+                    let weight = (type === 'yes') ? 1.0 : 0.5;
+                    globalSlotScores[slot] = (globalSlotScores[slot] || 0) + weight;
+                    if (uid === userId) selectedSlots.set(slot, type);
+                });
+            }
+        });
+        globalTotalVoters = voters.size;
+    }
+
     function showError(msg) {
         document.getElementById('loader').style.display = 'none';
         document.getElementById('event-title').innerText = "Error";
@@ -408,11 +429,11 @@
         document.getElementById('error-text').innerText = msg;
     }
 
-    function initViews() {
+    function initViews(interactive) {
         if (mode === 'date') {
-            initCalendar();
+            initCalendar(interactive);
         } else {
-            initTimeGrid();
+            initTimeGrid(interactive);
         }
     }
 
@@ -441,12 +462,32 @@
         }
     }
 
+    async function shareResults() {
+        document.getElementById('loader').style.display = 'flex';
+        try {
+            const res = await fetch(`${BACKEND_API_URL}/share_results`, {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ eventId: eventId })
+            });
+            const json = await res.json();
+            if (json.status === 'success') {
+                tg.close();
+            } else {
+                tg.showAlert("Error sharing: " + json.message);
+                document.getElementById('loader').style.display = 'none';
+            }
+        } catch (e) {
+            console.error(e);
+            document.getElementById('loader').style.display = 'none';
+            tg.showAlert("Network Error.");
+        }
+    }
+
     // --- BULK OPERATIONS ---
     function selectAll(currentMode) {
-        // Find all visible slots/days
         const selector = currentMode === 'time' ? '#grid .slot' : '#calendar .cal-day';
         const elements = document.querySelectorAll(selector);
-
         elements.forEach(el => {
             if (!el.classList.contains('empty')) {
                 selectedSlots.set(el.dataset.id, 'yes');
@@ -459,7 +500,6 @@
     function clearAll(currentMode) {
         const selector = currentMode === 'time' ? '#grid .slot' : '#calendar .cal-day';
         const elements = document.querySelectorAll(selector);
-
         elements.forEach(el => {
             if (!el.classList.contains('empty')) {
                 selectedSlots.delete(el.dataset.id);
@@ -470,14 +510,14 @@
     }
 
     // --- CALENDAR LOGIC ---
-    function initCalendar() {
+    function initCalendar(interactive) {
         document.getElementById('date-view').style.display = 'block';
-        renderMonth();
-        document.getElementById('prev-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() - 1); renderMonth(); };
-        document.getElementById('next-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() + 1); renderMonth(); };
+        renderMonth(interactive);
+        document.getElementById('prev-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() - 1); renderMonth(interactive); };
+        document.getElementById('next-month').onclick = () => { currentMonthDate.setMonth(currentMonthDate.getMonth() + 1); renderMonth(interactive); };
     }
 
-    function renderMonth() {
+    function renderMonth(interactive) {
         const year = currentMonthDate.getFullYear();
         const month = currentMonthDate.getMonth();
         const monthNames = ["January", "February", "March", "April", "May", "June", "July", "August", "September", "October", "November", "December"];
@@ -496,22 +536,25 @@
             const dateStr = dateObj.toISOString().split('T')[0];
             const cell = document.createElement('div');
             cell.className = 'cal-day'; cell.dataset.id = dateStr; cell.innerHTML = `<span>${d}</span>`;
+
             applyHeatmap(cell, dateStr);
-            updateSlotVisual(cell, dateStr);
-            attachDragEvents(cell);
+            // In voting mode, show selection. In result mode, just heatmap.
+            if (interactive) updateSlotVisual(cell, dateStr);
+
+            if (interactive) attachDragEvents(cell);
             calGrid.appendChild(cell);
         }
     }
 
     // --- TIME GRID LOGIC ---
-    function initTimeGrid() {
+    function initTimeGrid(interactive) {
         document.getElementById('time-view').style.display = 'block';
-        renderTimeGrid();
-        document.getElementById('prev-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() - 7); renderTimeGrid(); };
-        document.getElementById('next-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() + 7); renderTimeGrid(); };
+        renderTimeGrid(interactive);
+        document.getElementById('prev-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() - 7); renderTimeGrid(interactive); };
+        document.getElementById('next-week').onclick = () => { currentWeekStart.setDate(currentWeekStart.getDate() + 7); renderTimeGrid(interactive); };
     }
 
-    function renderTimeGrid() {
+    function renderTimeGrid(interactive) {
         const grid = document.getElementById('grid'); grid.innerHTML = '';
         const days = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun'];
         const dates = [];
@@ -522,10 +565,7 @@
             const h = document.createElement('div'); h.className = 'header-cell';
             const dateStr = `${d.getDate()}/${d.getMonth()+1}`;
             h.innerHTML = `<span>${days[i]}</span><span class="header-date">${dateStr}</span>`;
-
-            // Bulk Select Column
-            h.onclick = () => bulkSelect('col', i, dates);
-
+            if (interactive) h.onclick = () => bulkSelect('col', i, dates);
             grid.appendChild(h);
         }
 
@@ -536,25 +576,23 @@
 
         for (let h = 8; h < 22; h++) {
             const timeCol = document.createElement('div'); timeCol.className = 'time-col'; timeCol.innerText = `${h}:00`;
-
-            // Bulk Select Row
-            timeCol.onclick = () => bulkSelect('row', h, dates);
-
+            if (interactive) timeCol.onclick = () => bulkSelect('row', h, dates);
             grid.appendChild(timeCol);
             for (let i = 0; i < 7; i++) {
                 const dateStr = dates[i].toISOString().split('T')[0];
                 const slotId = `${dateStr}-${h}`;
                 const slot = document.createElement('div'); slot.className = 'slot'; slot.dataset.id = slotId;
+
                 applyHeatmap(slot, slotId);
-                updateSlotVisual(slot, slotId);
-                attachDragEvents(slot);
+                if (interactive) updateSlotVisual(slot, slotId);
+
+                if (interactive) attachDragEvents(slot);
                 grid.appendChild(slot);
             }
         }
     }
 
     function bulkSelect(type, index, dates) {
-        // Toggle entire row/col. Logic: If majority selected, clear. Else fill 'yes'.
         let ids = [];
         if (type === 'col') {
             const dateStr = dates[index].toISOString().split('T')[0];
@@ -565,18 +603,12 @@
                 ids.push(`${dateStr}-${index}`);
             }
         }
-
-        // Count selected
         let count = 0;
         ids.forEach(id => { if (selectedSlots.has(id)) count++; });
-
         const action = (count > ids.length / 2) ? 'clear' : 'yes';
-
         ids.forEach(id => {
             if (action === 'clear') selectedSlots.delete(id);
             else selectedSlots.set(id, 'yes');
-
-            // Update Visual
             const el = document.querySelector(`.slot[data-id="${id}"]`);
             if (el) updateSlotVisual(el, id);
         });
@@ -619,10 +651,7 @@
         isDragging = true;
         const cell = e.currentTarget;
         const id = cell.dataset.id;
-
-        // Determine drag type based on cycle of clicked cell
         dragType = cycleState(id);
-
         applyState(cell, id, dragType);
     }
 
