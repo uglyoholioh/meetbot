@@ -20,98 +20,51 @@ from fastapi.responses import HTMLResponse
 from fastapi.middleware.cors import CORSMiddleware
 import uvicorn
 from contextlib import asynccontextmanager
-from supabase import create_client, Client
 
 # --- CONFIGURATION ---
 TOKEN = os.getenv("TOKEN")
 WEB_APP_URL = os.getenv("WEB_APP_URL", "")
-SUPABASE_URL = os.getenv("SUPABASE_URL")
-SUPABASE_KEY = os.getenv("SUPABASE_KEY")
 DATA_FILE = "storage.json"
 
 logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- PERSISTENCE MANAGER ---
+# --- PERSISTENCE MANAGER (Local Only) ---
 class Persistence:
     def __init__(self):
-        self.client: Client = None
-        self.use_db = False
-
-        if SUPABASE_URL and SUPABASE_KEY:
-            try:
-                self.client = create_client(SUPABASE_URL, SUPABASE_KEY)
-                self.use_db = True
-                logger.info("Supabase configured.")
-            except Exception as e:
-                logger.error(f"Failed to init Supabase: {e}")
-                self.use_db = False
+        pass
 
     def load_all(self):
-        """Loads all events. Returns dict."""
-        if self.use_db:
+        """Loads all events from local file."""
+        if os.path.exists(DATA_FILE):
             try:
-                # Assuming table 'events' with columns: id (text), data (jsonb)
-                response = self.client.table("events").select("*").execute()
-                # Map list of rows to dict {id: data}
-                data_map = {}
-                for row in response.data:
-                    data_map[row['id']] = row['data']
-                return data_map
+                with open(DATA_FILE, "r", encoding="utf-8") as f:
+                    return json.load(f)
             except Exception as e:
-                logger.error(f"DB Load Error: {e}. Falling back to empty.")
-                return {}
-        else:
-            if os.path.exists(DATA_FILE):
-                try:
-                    with open(DATA_FILE, "r", encoding="utf-8") as f:
-                        return json.load(f)
-                except Exception as e:
-                    logger.error(f"File Load Error: {e}")
-            return {}
+                logger.error(f"File Load Error: {e}")
+        return {}
 
     def upsert_event(self, event_id: str, data: dict):
-        """Upserts a single event."""
-        # Update memory cache
+        """Upserts a single event to memory and file."""
         events_db[event_id] = data
-
-        if self.use_db:
-            try:
-                self.client.table("events").upsert({"id": event_id, "data": data}).execute()
-            except Exception as e:
-                logger.error(f"DB Upsert Error: {e}")
-        else:
-            self._save_file()
+        self._save_file()
 
     def upsert_setup(self, setup_id: str, data: list):
         """Upserts setup data (list)."""
         events_db[setup_id] = data
-        if self.use_db:
-            try:
-                self.client.table("events").upsert({"id": setup_id, "data": data}).execute()
-            except Exception as e:
-                logger.error(f"DB Upsert Setup Error: {e}")
-        else:
-            self._save_file()
+        self._save_file()
 
     def delete_event(self, event_id: str):
         """Deletes an event."""
         if event_id in events_db:
             del events_db[event_id]
-
-        if self.use_db:
-            try:
-                self.client.table("events").delete().eq("id", event_id).execute()
-            except Exception as e:
-                logger.error(f"DB Delete Error: {e}")
-        else:
-            self._save_file()
+        self._save_file()
 
     def _save_file(self):
         """Helper for file persistence."""
         try:
             with open(DATA_FILE, "w", encoding="utf-8") as f:
-                json.dump(events_db, f)
+                json.dump(events_db, f, indent=2)
         except Exception as e:
             logger.error(f"File Save Error: {e}")
 

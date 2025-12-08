@@ -6,4 +6,3 @@ requests
 matplotlib
 seaborn
 pandas
-supabase
